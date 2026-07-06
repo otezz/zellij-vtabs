@@ -5,9 +5,10 @@ use zellij_tile::prelude::*;
 const TOP_PAD: usize = 1;
 const LEFT_PAD: usize = 1;
 
-/// Markers appended to tab names by the zellij-attention plugin. We read them
-/// (global, consistent state that every sidebar instance sees identically),
-/// strip them for a clean label, and render our own icon + group rollup.
+/// Attention is encoded as a suffix on the tab NAME — global state that every
+/// sidebar instance reads identically (no per-instance divergence). We add it on
+/// the attention pipe and strip it when the tab is focused; both are `rename_tab`
+/// calls that mutate the shared tab name.
 const MARK_WAITING: &str = " ⏳";
 const MARK_COMPLETED: &str = " ✅";
 
@@ -17,7 +18,6 @@ enum Attention {
     Completed,
 }
 
-/// Waiting always wins over Completed when aggregating a group.
 fn merge(acc: Option<Attention>, x: Attention) -> Attention {
     match (acc, x) {
         (Some(Attention::Waiting), _) | (_, Attention::Waiting) => Attention::Waiting,
@@ -25,7 +25,7 @@ fn merge(acc: Option<Attention>, x: Attention) -> Attention {
     }
 }
 
-/// Split a zellij-attention marker off a tab name: ("work:api ⏳") -> (Waiting, "work:api").
+/// Split the attention marker off a tab name: "work:api ⏳" -> (Waiting, "work:api").
 fn parse_attention(name: &str) -> (Option<Attention>, &str) {
     if let Some(base) = name.strip_suffix(MARK_WAITING) {
         (Some(Attention::Waiting), base)
@@ -39,6 +39,8 @@ fn parse_attention(name: &str) -> (Option<Attention>, &str) {
 #[derive(Default)]
 struct State {
     tabs: Vec<TabInfo>,
+    /// terminal pane id -> tab position (rebuilt on each PaneUpdate)
+    pane_tab: BTreeMap<u32, usize>,
     collapsed: BTreeSet<String>,
     selected: usize,
     separator: char,
@@ -54,7 +56,6 @@ enum Row {
 }
 
 impl State {
-    /// Split a tab name into (group, label) on the first separator.
     fn group_of<'a>(&self, name: &'a str) -> (String, &'a str) {
         match name.find(self.separator) {
             Some(i) => (
@@ -109,13 +110,36 @@ impl State {
             .position(|r| matches!(r, Row::Tab { active: true, .. }))
     }
 
-    /// Colored icon (with trailing space) for a row's attention state, or empty.
-    /// `\e[39m` resets only the foreground so it nests inside the `\e[7m` highlight.
     fn icon(&self, att: Option<Attention>) -> String {
         match att {
             Some(Attention::Waiting) => format!("\u{1b}[33m{}\u{1b}[39m ", self.waiting_icon),
             Some(Attention::Completed) => format!("\u{1b}[32m{}\u{1b}[39m ", self.completed_icon),
             None => String::new(),
+        }
+    }
+
+    /// Add an attention marker to the tab containing `pane_id` (global rename).
+    fn set_attention(&self, pane_id: u32, marker: &str) {
+        let target = self.pane_tab.get(&pane_id).and_then(|&tab_pos| {
+            self.tabs.iter().find(|t| t.position == tab_pos).map(|t| {
+                let (_, base) = parse_attention(&t.name);
+                (tab_pos as u32 + 1, format!("{}{}", base, marker))
+            })
+        });
+        if let Some((pos, name)) = target {
+            rename_tab(pos, name);
+        }
+    }
+
+    /// Strip the attention marker from the active tab (global rename) — this is
+    /// the "clear on focus" path, keyed on the focused TAB not pane focus.
+    fn clear_active_tab(&self) {
+        let target = self.tabs.iter().find(|t| t.active).and_then(|t| {
+            let (att, base) = parse_attention(&t.name);
+            att.map(|_| (t.position as u32 + 1, base.to_string()))
+        });
+        if let Some((pos, name)) = target {
+            rename_tab(pos, name);
         }
     }
 
@@ -208,14 +232,22 @@ impl ZellijPlugin for State {
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
+            PermissionType::ReadCliPipes,
         ]);
-        subscribe(&[EventType::TabUpdate, EventType::Key, EventType::Mouse]);
+        subscribe(&[
+            EventType::TabUpdate,
+            EventType::PaneUpdate,
+            EventType::Key,
+            EventType::Mouse,
+        ]);
     }
 
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::TabUpdate(tabs) => {
                 self.tabs = tabs;
+                // Clear on focus: strip the marker from the now-active tab.
+                self.clear_active_tab();
                 if let Some(i) = self.active_row_index() {
                     self.selected = i;
                 } else {
@@ -226,10 +258,44 @@ impl ZellijPlugin for State {
                 }
                 true
             }
+            Event::PaneUpdate(manifest) => {
+                self.pane_tab.clear();
+                for (tab_pos, panes) in manifest.panes {
+                    for p in panes {
+                        if !p.is_plugin {
+                            self.pane_tab.insert(p.id, tab_pos);
+                        }
+                    }
+                }
+                false
+            }
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => false,
         }
+    }
+
+    /// Attention signals: `zellij-vtabs::waiting|completed::<pane_id>` (broadcast CLI pipe).
+    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        if let Some(rest) = pipe_message.name.strip_prefix("zellij-vtabs::") {
+            let parts: Vec<&str> = rest.split("::").collect();
+            if parts.len() == 2 {
+                if let Ok(pane_id) = parts[1].parse::<u32>() {
+                    match parts[0] {
+                        "waiting" => {
+                            self.set_attention(pane_id, MARK_WAITING);
+                            return false;
+                        }
+                        "completed" => {
+                            self.set_attention(pane_id, MARK_COMPLETED);
+                            return false;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn render(&mut self, _rows: usize, cols: usize) {
