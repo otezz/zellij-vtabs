@@ -41,6 +41,9 @@ struct State {
     tabs: Vec<TabInfo>,
     /// terminal pane id -> tab position (rebuilt on each PaneUpdate)
     pane_tab: BTreeMap<u32, usize>,
+    /// active tab position at the last TabUpdate — used to distinguish a real
+    /// tab *switch* (should clear) from a rename-triggered TabUpdate (should not).
+    last_active: Option<usize>,
     collapsed: BTreeSet<String>,
     selected: usize,
     separator: char,
@@ -246,8 +249,14 @@ impl ZellijPlugin for State {
         match event {
             Event::TabUpdate(tabs) => {
                 self.tabs = tabs;
-                // Clear on focus: strip the marker from the now-active tab.
-                self.clear_active_tab();
+                // Clear on focus, but ONLY when the active tab actually changed
+                // (a real switch) — not on the TabUpdate our own rename triggers,
+                // which would instantly strip a marker set on the current tab.
+                let active = self.tabs.iter().find(|t| t.active).map(|t| t.position);
+                if active != self.last_active {
+                    self.last_active = active;
+                    self.clear_active_tab();
+                }
                 if let Some(i) = self.active_row_index() {
                     self.selected = i;
                 } else {
