@@ -1,3 +1,7 @@
+// In `cargo test` the plugin entry points are gated out (see below), so the
+// methods they call look unused — silence that only for test builds.
+#![cfg_attr(test, allow(dead_code))]
+
 use std::collections::{BTreeMap, BTreeSet};
 use zellij_tile::prelude::*;
 
@@ -12,7 +16,7 @@ const LEFT_PAD: usize = 1;
 const MARK_WAITING: &str = " ⏳";
 const MARK_COMPLETED: &str = " ✅";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Attention {
     Waiting,
     Completed,
@@ -48,7 +52,18 @@ struct State {
     completed_icon: String,
 }
 
+// The plugin entry points call zellij-tile's wasm host imports, which don't exist
+// on the host target — gate them out of `cargo test` so the pure logic can be tested.
+#[cfg(not(test))]
 register_plugin!(State);
+
+/// A tab within a group, while building the tree.
+struct TabItem {
+    position: usize,
+    label: String,
+    active: bool,
+    attention: Option<Attention>,
+}
 
 enum Row {
     Group { name: String, collapsed: bool, count: usize, attention: Option<Attention> },
@@ -68,25 +83,28 @@ impl State {
 
     fn build_rows(&self) -> Vec<Row> {
         let mut order: Vec<String> = Vec::new();
-        let mut groups: BTreeMap<String, Vec<(usize, String, bool, Option<Attention>)>> =
-            BTreeMap::new();
+        let mut groups: BTreeMap<String, Vec<TabItem>> = BTreeMap::new();
         for t in &self.tabs {
-            let (att, base) = parse_attention(&t.name);
+            let (attention, base) = parse_attention(&t.name);
             let (g, label) = self.group_of(base);
             if !order.contains(&g) {
                 order.push(g.clone());
             }
-            groups
-                .entry(g)
-                .or_default()
-                .push((t.position, label.to_string(), t.active, att));
+            groups.entry(g).or_default().push(TabItem {
+                position: t.position,
+                label: label.to_string(),
+                active: t.active,
+                attention,
+            });
         }
         let mut rows = Vec::new();
         for g in &order {
-            let items = groups.get(g).cloned().unwrap_or_default();
+            let Some(items) = groups.remove(g) else {
+                continue;
+            };
             let collapsed = self.collapsed.contains(g);
-            let group_att = items.iter().fold(None, |acc, (_, _, _, a)| match a {
-                Some(x) => Some(merge(acc, *x)),
+            let group_att = items.iter().fold(None, |acc, it| match it.attention {
+                Some(x) => Some(merge(acc, x)),
                 None => acc,
             });
             rows.push(Row::Group {
@@ -96,8 +114,13 @@ impl State {
                 attention: group_att,
             });
             if !collapsed {
-                for (position, label, active, attention) in items {
-                    rows.push(Row::Tab { position, label, active, attention });
+                for it in items {
+                    rows.push(Row::Tab {
+                        position: it.position,
+                        label: it.label,
+                        active: it.active,
+                        attention: it.attention,
+                    });
                 }
             }
         }
@@ -217,6 +240,7 @@ impl State {
     }
 }
 
+#[cfg(not(test))]
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.separator = configuration
@@ -328,9 +352,9 @@ impl ZellijPlugin for State {
                     format!("  {} {}{}", dot, self.icon(*attention), label)
                 }
             };
-            let line = truncate(&format!("{}{}", pad, core), cols);
+            let line = truncate_visible(&format!("{}{}", pad, core), cols);
             if i == self.selected {
-                let w = line.chars().count();
+                let w = visible_width(&line);
                 let bar = if w < cols {
                     format!("{}{}", line, " ".repeat(cols - w))
                 } else {
@@ -346,11 +370,101 @@ impl ZellijPlugin for State {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let keep = max.saturating_sub(1);
-        s.chars().take(keep).collect::<String>() + "…"
+/// Number of *visible* characters, ignoring ANSI CSI escape sequences (`ESC [ … letter`).
+fn visible_width(s: &str) -> usize {
+    let mut w = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // consume the escape sequence up to and including its final letter
+            for e in chars.by_ref() {
+                if e.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            w += 1;
+        }
+    }
+    w
+}
+
+/// Truncate to `max` *visible* columns, preserving ANSI escapes intact (never cut
+/// mid-sequence) and appending `…` when content is dropped.
+fn truncate_visible(s: &str, max: usize) -> String {
+    if visible_width(s) <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let mut out = String::new();
+    let mut w = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            out.push(c);
+            for e in chars.by_ref() {
+                out.push(e);
+                if e.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            if w >= keep {
+                break;
+            }
+            out.push(c);
+            w += 1;
+        }
+    }
+    out.push('…');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_attention_variants() {
+        assert_eq!(parse_attention("work:api ⏳"), (Some(Attention::Waiting), "work:api"));
+        assert_eq!(parse_attention("db ✅"), (Some(Attention::Completed), "db"));
+        assert_eq!(parse_attention("plain"), (None, "plain"));
+    }
+
+    #[test]
+    fn parse_attention_roundtrips_with_set() {
+        let (_, base) = parse_attention("x:y ⏳");
+        assert_eq!(format!("{}{}", base, MARK_WAITING), "x:y ⏳");
+    }
+
+    #[test]
+    fn group_of_splits_and_defaults() {
+        let s = State { separator: ':', ..Default::default() };
+        assert_eq!(s.group_of("work:api"), ("work".to_string(), "api"));
+        assert_eq!(s.group_of("work: api"), ("work".to_string(), "api")); // trims one space
+        assert_eq!(s.group_of("scratch"), ("General".to_string(), "scratch"));
+    }
+
+    #[test]
+    fn merge_waiting_wins() {
+        assert_eq!(merge(Some(Attention::Completed), Attention::Waiting), Attention::Waiting);
+        assert_eq!(merge(Some(Attention::Waiting), Attention::Completed), Attention::Waiting);
+        assert_eq!(merge(None, Attention::Completed), Attention::Completed);
+    }
+
+    #[test]
+    fn visible_width_ignores_ansi() {
+        // ◆, space, x  => 3 visible; the color codes count for nothing
+        assert_eq!(visible_width("\u{1b}[33m◆\u{1b}[39m x"), 3);
+        assert_eq!(visible_width("plain"), 5);
+    }
+
+    #[test]
+    fn truncate_visible_keeps_escapes_and_width() {
+        let s = "\u{1b}[33m◆\u{1b}[39m hello"; // visible "◆ hello" = 7
+        let out = truncate_visible(s, 4);
+        assert_eq!(visible_width(&out), 4); // 3 kept + …
+        assert!(out.contains("\u{1b}[33m")); // escape preserved, not sliced
+        assert_eq!(truncate_visible("abc", 5), "abc"); // no-op when it fits
     }
 }
