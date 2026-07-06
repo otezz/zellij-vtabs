@@ -5,11 +5,11 @@ use zellij_tile::prelude::*;
 const TOP_PAD: usize = 1;
 const LEFT_PAD: usize = 1;
 
-/// This plugin's own URL — used to broadcast clear messages to every instance
-/// (the layout spawns one sidebar instance per tab; they must stay in sync).
-const PLUGIN_URL: &str = "file:~/.config/zellij/plugins/zellij-vtabs.wasm";
-/// Internal cross-instance message name for "clear attention on this pane".
-const CLEAR_MSG: &str = "vtabs_clear";
+/// Markers appended to tab names by the zellij-attention plugin. We read them
+/// (global, consistent state that every sidebar instance sees identically),
+/// strip them for a clean label, and render our own icon + group rollup.
+const MARK_WAITING: &str = " ⏳";
+const MARK_COMPLETED: &str = " ✅";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Attention {
@@ -17,7 +17,7 @@ enum Attention {
     Completed,
 }
 
-/// Waiting always wins over Completed when aggregating a tab/group.
+/// Waiting always wins over Completed when aggregating a group.
 fn merge(acc: Option<Attention>, x: Attention) -> Attention {
     match (acc, x) {
         (Some(Attention::Waiting), _) | (_, Attention::Waiting) => Attention::Waiting,
@@ -25,13 +25,20 @@ fn merge(acc: Option<Attention>, x: Attention) -> Attention {
     }
 }
 
+/// Split a zellij-attention marker off a tab name: ("work:api ⏳") -> (Waiting, "work:api").
+fn parse_attention(name: &str) -> (Option<Attention>, &str) {
+    if let Some(base) = name.strip_suffix(MARK_WAITING) {
+        (Some(Attention::Waiting), base)
+    } else if let Some(base) = name.strip_suffix(MARK_COMPLETED) {
+        (Some(Attention::Completed), base)
+    } else {
+        (None, name)
+    }
+}
+
 #[derive(Default)]
 struct State {
     tabs: Vec<TabInfo>,
-    /// terminal pane id -> tab position (rebuilt on each PaneUpdate)
-    pane_tab: BTreeMap<u32, usize>,
-    /// pane id -> pending attention (set via pipe, cleared on focus)
-    attention: BTreeMap<u32, Attention>,
     collapsed: BTreeSet<String>,
     selected: usize,
     separator: char,
@@ -48,25 +55,14 @@ enum Row {
 
 impl State {
     /// Split a tab name into (group, label) on the first separator.
-    fn group_of(&self, name: &str) -> (String, String) {
+    fn group_of<'a>(&self, name: &'a str) -> (String, &'a str) {
         match name.find(self.separator) {
             Some(i) => (
                 name[..i].to_string(),
-                name[i + self.separator.len_utf8()..].trim().to_string(),
+                name[i + self.separator.len_utf8()..].trim_start(),
             ),
-            None => ("General".to_string(), name.to_string()),
+            None => ("General".to_string(), name),
         }
-    }
-
-    /// Aggregate attention across all panes belonging to a tab.
-    fn tab_attention(&self, tab_pos: usize) -> Option<Attention> {
-        let mut result = None;
-        for (pane, att) in &self.attention {
-            if self.pane_tab.get(pane) == Some(&tab_pos) {
-                result = Some(merge(result, *att));
-            }
-        }
-        result
     }
 
     fn build_rows(&self) -> Vec<Row> {
@@ -74,15 +70,15 @@ impl State {
         let mut groups: BTreeMap<String, Vec<(usize, String, bool, Option<Attention>)>> =
             BTreeMap::new();
         for t in &self.tabs {
-            let (g, label) = self.group_of(&t.name);
+            let (att, base) = parse_attention(&t.name);
+            let (g, label) = self.group_of(base);
             if !order.contains(&g) {
                 order.push(g.clone());
             }
-            let att = self.tab_attention(t.position);
             groups
                 .entry(g)
                 .or_default()
-                .push((t.position, label, t.active, att));
+                .push((t.position, label.to_string(), t.active, att));
         }
         let mut rows = Vec::new();
         for g in &order {
@@ -114,8 +110,7 @@ impl State {
     }
 
     /// Colored icon (with trailing space) for a row's attention state, or empty.
-    /// Uses `\e[39m` (reset foreground only) so it nests inside the selection
-    /// highlight's `\e[7m…\e[0m` without terminating the reverse-video early.
+    /// `\e[39m` resets only the foreground so it nests inside the `\e[7m` highlight.
     fn icon(&self, att: Option<Attention>) -> String {
         match att {
             Some(Attention::Waiting) => format!("\u{1b}[33m{}\u{1b}[39m ", self.waiting_icon),
@@ -213,42 +208,14 @@ impl ZellijPlugin for State {
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
-            PermissionType::ReadCliPipes,
         ]);
-        subscribe(&[
-            EventType::TabUpdate,
-            EventType::PaneUpdate,
-            EventType::Key,
-            EventType::Mouse,
-        ]);
+        subscribe(&[EventType::TabUpdate, EventType::Key, EventType::Mouse]);
     }
 
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::TabUpdate(tabs) => {
                 self.tabs = tabs;
-                // Focusing a tab clears attention for all its panes. PaneUpdate
-                // doesn't fire on a tab switch, so this is the reliable clear path.
-                // Focusing a tab clears attention for all its panes — and, because
-                // there's one sidebar instance per tab, we broadcast the clear so
-                // every instance drops it too (otherwise they diverge).
-                if let Some(pos) = self.tabs.iter().find(|t| t.active).map(|t| t.position) {
-                    let panes: Vec<u32> = self
-                        .pane_tab
-                        .iter()
-                        .filter(|(_, &t)| t == pos)
-                        .map(|(&p, _)| p)
-                        .collect();
-                    for p in panes {
-                        if self.attention.remove(&p).is_some() {
-                            pipe_message_to_plugin(
-                                MessageToPlugin::new(CLEAR_MSG)
-                                    .with_plugin_url(PLUGIN_URL)
-                                    .with_payload(p.to_string()),
-                            );
-                        }
-                    }
-                }
                 if let Some(i) = self.active_row_index() {
                     self.selected = i;
                 } else {
@@ -259,58 +226,10 @@ impl ZellijPlugin for State {
                 }
                 true
             }
-            Event::PaneUpdate(manifest) => {
-                self.pane_tab.clear();
-                for (tab_pos, panes) in manifest.panes {
-                    for p in panes {
-                        if p.is_plugin {
-                            continue;
-                        }
-                        self.pane_tab.insert(p.id, tab_pos);
-                        // Focusing a pane clears its pending attention.
-                        if p.is_focused {
-                            self.attention.remove(&p.id);
-                        }
-                    }
-                }
-                // Drop attention for panes that no longer exist.
-                self.attention.retain(|pane, _| self.pane_tab.contains_key(pane));
-                true
-            }
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => false,
         }
-    }
-
-    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
-        // Internal cross-instance clear (broadcast from whichever instance saw the focus).
-        if pipe_message.name == CLEAR_MSG {
-            if let Some(pane_id) = pipe_message.payload.as_deref().and_then(|s| s.parse::<u32>().ok()) {
-                return self.attention.remove(&pane_id).is_some();
-            }
-            return false;
-        }
-        // External attention signals: `zellij-vtabs::<event>::<pane_id>` (broadcast CLI pipe).
-        if let Some(rest) = pipe_message.name.strip_prefix("zellij-vtabs::") {
-            let parts: Vec<&str> = rest.split("::").collect();
-            if parts.len() == 2 {
-                if let Ok(pane_id) = parts[1].parse::<u32>() {
-                    match parts[0] {
-                        "waiting" => {
-                            self.attention.insert(pane_id, Attention::Waiting);
-                            return true;
-                        }
-                        "completed" => {
-                            self.attention.insert(pane_id, Attention::Completed);
-                            return true;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        false
     }
 
     fn render(&mut self, _rows: usize, cols: usize) {
@@ -329,8 +248,6 @@ impl ZellijPlugin for State {
             let core = match row {
                 Row::Group { name, collapsed, count, attention } => {
                     let disc = if *collapsed { "▸" } else { "▾" };
-                    // Roll the attention icon up to the header only when collapsed;
-                    // when expanded the tabs show their own icons.
                     let icon = if *collapsed { self.icon(*attention) } else { String::new() };
                     format!("{} {}{} ({})", disc, icon, name, count)
                 }
