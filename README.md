@@ -15,15 +15,10 @@ A vertical, grouped, collapsible tab sidebar for [Zellij](https://zellij.dev) �
 Zellij has no native vertical tabs. This plugin renders a left sidebar showing tabs as a
 **collapsible tree grouped by name prefix**, so I can keep many tabs organized at a glance:
 
-```
-▼ work (3)
-    api
-    web
-  ◆ infra          ← yellow ◆ = needs input
-▶ side (2)         ← collapsed; ▶ would show ◆/✓ if a tab inside needs attention
-▼ General (1)
-  ● scratch        ← ● = active tab
-```
+![zellij-vtabs sidebar](docs/screenshot.png)
+
+Groups (`▼`/`▶`) collapse and expand; `◆` (yellow) marks a tab needing input, `✓` (green) a
+finished one, and `●` marks the active tab.
 
 - **Grouping** — a tab named `group:label` goes under group **group** with label **label**;
   a tab with no `:` lands in **General**. (First `:` wins.)
