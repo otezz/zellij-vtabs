@@ -5,9 +5,6 @@ edition = "2021"
 description = "Zellij vertical sidebar: grouped tabs with collapse/expand"
 license = "MIT"
 
-[lib]
-crate-type = ["cdylib"]
-
 [dependencies]
 zellij-tile = "=0.44.2"
 
