@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use zellij_tile::prelude::*;
 
+/// Blank lines above the tree / spaces to the left of each row (breathing room).
+const TOP_PAD: usize = 1;
+const LEFT_PAD: usize = 1;
+
 #[derive(Default)]
 struct State {
     tabs: Vec<TabInfo>,
@@ -55,6 +59,13 @@ impl State {
         rows
     }
 
+    /// Visible-row index of the currently active tab, if it's not hidden in a collapsed group.
+    fn active_row_index(&self) -> Option<usize> {
+        self.build_rows()
+            .iter()
+            .position(|r| matches!(r, Row::Tab { active: true, .. }))
+    }
+
     /// Activate the row at `idx`: toggle a group's collapse, or switch to a tab.
     fn activate(&mut self, idx: usize) -> bool {
         let rows = self.build_rows();
@@ -107,10 +118,12 @@ impl State {
         }
         match mouse {
             Mouse::LeftClick(row, _col) => {
-                if row < 0 || row as usize >= len {
+                // Account for the blank top-padding lines drawn before the tree.
+                let idx = row - TOP_PAD as isize;
+                if idx < 0 || idx as usize >= len {
                     return false;
                 }
-                let idx = row as usize;
+                let idx = idx as usize;
                 self.selected = idx;
                 self.activate(idx);
                 true
@@ -145,9 +158,14 @@ impl ZellijPlugin for State {
         match event {
             Event::TabUpdate(tabs) => {
                 self.tabs = tabs;
-                let len = self.build_rows().len();
-                if len > 0 && self.selected >= len {
-                    self.selected = len - 1;
+                // Keep the highlight on the active tab (unless it's in a collapsed group).
+                if let Some(i) = self.active_row_index() {
+                    self.selected = i;
+                } else {
+                    let len = self.build_rows().len();
+                    if len > 0 && self.selected >= len {
+                        self.selected = len - 1;
+                    }
                 }
                 true
             }
@@ -159,13 +177,18 @@ impl ZellijPlugin for State {
 
     fn render(&mut self, _rows: usize, cols: usize) {
         let visible = self.build_rows();
+        let pad = " ".repeat(LEFT_PAD);
+        let mut out = String::new();
+        for _ in 0..TOP_PAD {
+            out.push_str("\r\n");
+        }
         if visible.is_empty() {
-            print!("\u{1b}[2m(no tabs)\u{1b}[0m");
+            out.push_str(&format!("{}\u{1b}[2m(no tabs)\u{1b}[0m", pad));
+            print!("{}", out);
             return;
         }
-        let mut out = String::new();
         for (i, row) in visible.iter().enumerate() {
-            let text = match row {
+            let core = match row {
                 Row::Group { name, collapsed, count } => {
                     let disc = if *collapsed { "▸" } else { "▾" };
                     format!("{} {} ({})", disc, name, count)
@@ -175,11 +198,18 @@ impl ZellijPlugin for State {
                     format!("  {} {}", marker, label)
                 }
             };
-            let text = truncate(&text, cols);
+            let line = truncate(&format!("{}{}", pad, core), cols);
             if i == self.selected {
-                out.push_str(&format!("\u{1b}[7m{}\u{1b}[0m", text));
+                // pad to full width so the highlight reads as a solid bar
+                let w = line.chars().count();
+                let bar = if w < cols {
+                    format!("{}{}", line, " ".repeat(cols - w))
+                } else {
+                    line
+                };
+                out.push_str(&format!("\u{1b}[7m{}\u{1b}[0m", bar));
             } else {
-                out.push_str(&text);
+                out.push_str(&line);
             }
             out.push_str("\r\n");
         }
