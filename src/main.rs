@@ -5,6 +5,12 @@ use zellij_tile::prelude::*;
 const TOP_PAD: usize = 1;
 const LEFT_PAD: usize = 1;
 
+/// This plugin's own URL — used to broadcast clear messages to every instance
+/// (the layout spawns one sidebar instance per tab; they must stay in sync).
+const PLUGIN_URL: &str = "file:~/.config/zellij/plugins/zellij-vtabs.wasm";
+/// Internal cross-instance message name for "clear attention on this pane".
+const CLEAR_MSG: &str = "vtabs_clear";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Attention {
     Waiting,
@@ -223,15 +229,24 @@ impl ZellijPlugin for State {
                 self.tabs = tabs;
                 // Focusing a tab clears attention for all its panes. PaneUpdate
                 // doesn't fire on a tab switch, so this is the reliable clear path.
+                // Focusing a tab clears attention for all its panes — and, because
+                // there's one sidebar instance per tab, we broadcast the clear so
+                // every instance drops it too (otherwise they diverge).
                 if let Some(pos) = self.tabs.iter().find(|t| t.active).map(|t| t.position) {
-                    let clear: Vec<u32> = self
+                    let panes: Vec<u32> = self
                         .pane_tab
                         .iter()
                         .filter(|(_, &t)| t == pos)
                         .map(|(&p, _)| p)
                         .collect();
-                    for p in clear {
-                        self.attention.remove(&p);
+                    for p in panes {
+                        if self.attention.remove(&p).is_some() {
+                            pipe_message_to_plugin(
+                                MessageToPlugin::new(CLEAR_MSG)
+                                    .with_plugin_url(PLUGIN_URL)
+                                    .with_payload(p.to_string()),
+                            );
+                        }
                     }
                 }
                 if let Some(i) = self.active_row_index() {
@@ -268,8 +283,15 @@ impl ZellijPlugin for State {
         }
     }
 
-    /// Attention signals arrive as broadcast pipes: `zellij-vtabs::<event>::<pane_id>`.
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        // Internal cross-instance clear (broadcast from whichever instance saw the focus).
+        if pipe_message.name == CLEAR_MSG {
+            if let Some(pane_id) = pipe_message.payload.as_deref().and_then(|s| s.parse::<u32>().ok()) {
+                return self.attention.remove(&pane_id).is_some();
+            }
+            return false;
+        }
+        // External attention signals: `zellij-vtabs::<event>::<pane_id>` (broadcast CLI pipe).
         if let Some(rest) = pipe_message.name.strip_prefix("zellij-vtabs::") {
             let parts: Vec<&str> = rest.split("::").collect();
             if parts.len() == 2 {
