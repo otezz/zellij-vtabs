@@ -42,6 +42,14 @@ cargo build --release --target wasm32-wasip1
 cp target/wasm32-wasip1/release/zellij-vtabs.wasm ~/.config/zellij/plugins/zellij-vtabs.wasm
 ```
 
+Or skip the Rust toolchain and grab the prebuilt `zellij-vtabs.wasm` from the
+[latest release](https://github.com/otezz/zellij-vtabs/releases/latest):
+
+```bash
+curl -Lo ~/.config/zellij/plugins/zellij-vtabs.wasm \
+  https://github.com/otezz/zellij-vtabs/releases/latest/download/zellij-vtabs.wasm
+```
+
 Pre-seed the plugin's permissions (Zellij's in-pane grant prompt doesn't render usably in a
 narrow sidebar), in `~/.cache/zellij/permissions.kdl`. Note Zellij keys this by the **resolved
 absolute** path, so use your real home dir here (not `~`):
