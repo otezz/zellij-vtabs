@@ -1,0 +1,15 @@
+// vtabs.kdl — layout with the zellij-vtabs vertical sidebar + default status bar
+// Usage: zellij --layout vtabs
+
+layout {
+    pane split_direction="vertical" {
+        pane size=28 borderless=true {
+            plugin location="file:~/.config/zellij/plugins/zellij-vtabs.wasm"
+        }
+        pane // main terminal area
+    }
+    // single-line compact bar, matching the default layout's look
+    pane size=1 borderless=true {
+        plugin location="zellij:compact-bar"
+    }
+}
