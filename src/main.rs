@@ -41,9 +41,6 @@ struct State {
     tabs: Vec<TabInfo>,
     /// terminal pane id -> tab position (rebuilt on each PaneUpdate)
     pane_tab: BTreeMap<u32, usize>,
-    /// active tab position at the last TabUpdate — used to distinguish a real
-    /// tab *switch* (should clear) from a rename-triggered TabUpdate (should not).
-    last_active: Option<usize>,
     collapsed: BTreeSet<String>,
     selected: usize,
     separator: char,
@@ -123,26 +120,28 @@ impl State {
 
     /// Add an attention marker to the tab containing `pane_id` (global rename).
     fn set_attention(&self, pane_id: u32, marker: &str) {
-        let target = self.pane_tab.get(&pane_id).and_then(|&tab_pos| {
-            self.tabs.iter().find(|t| t.position == tab_pos).map(|t| {
-                let (_, base) = parse_attention(&t.name);
-                (tab_pos as u32 + 1, format!("{}{}", base, marker))
-            })
-        });
-        if let Some((pos, name)) = target {
-            rename_tab(pos, name);
+        let active = self.tabs.iter().find(|t| t.active).map(|t| t.position);
+        let Some(&tab_pos) = self.pane_tab.get(&pane_id) else {
+            return;
+        };
+        // Never mark the tab you're already looking at — you don't need an
+        // attention cue for it, and it keeps set/clear free of any race.
+        if Some(tab_pos) == active {
+            return;
+        }
+        if let Some(t) = self.tabs.iter().find(|t| t.position == tab_pos) {
+            let (_, base) = parse_attention(&t.name);
+            rename_tab(tab_pos as u32 + 1, format!("{}{}", base, marker));
         }
     }
 
-    /// Strip the attention marker from the active tab (global rename) — this is
-    /// the "clear on focus" path, keyed on the focused TAB not pane focus.
-    fn clear_active_tab(&self) {
-        let target = self.tabs.iter().find(|t| t.active).and_then(|t| {
+    /// Strip the attention marker from the tab at `pos` (global rename).
+    fn clear_tab(&self, pos: usize) {
+        if let Some(t) = self.tabs.iter().find(|t| t.position == pos) {
             let (att, base) = parse_attention(&t.name);
-            att.map(|_| (t.position as u32 + 1, base.to_string()))
-        });
-        if let Some((pos, name)) = target {
-            rename_tab(pos, name);
+            if att.is_some() {
+                rename_tab(pos as u32 + 1, base.to_string());
+            }
         }
     }
 
@@ -249,13 +248,11 @@ impl ZellijPlugin for State {
         match event {
             Event::TabUpdate(tabs) => {
                 self.tabs = tabs;
-                // Clear on focus, but ONLY when the active tab actually changed
-                // (a real switch) — not on the TabUpdate our own rename triggers,
-                // which would instantly strip a marker set on the current tab.
-                let active = self.tabs.iter().find(|t| t.active).map(|t| t.position);
-                if active != self.last_active {
-                    self.last_active = active;
-                    self.clear_active_tab();
+                // Clear on focus: the active tab is "seen", so strip its marker.
+                // Safe on every TabUpdate because set_attention never marks the
+                // active tab, so there's no marker here to race with.
+                if let Some(pos) = self.tabs.iter().find(|t| t.active).map(|t| t.position) {
+                    self.clear_tab(pos);
                 }
                 if let Some(i) = self.active_row_index() {
                     self.selected = i;
@@ -269,10 +266,10 @@ impl ZellijPlugin for State {
             }
             Event::PaneUpdate(manifest) => {
                 self.pane_tab.clear();
-                for (tab_pos, panes) in manifest.panes {
+                for (tab_pos, panes) in &manifest.panes {
                     for p in panes {
                         if !p.is_plugin {
-                            self.pane_tab.insert(p.id, tab_pos);
+                            self.pane_tab.insert(p.id, *tab_pos);
                         }
                     }
                 }
@@ -322,7 +319,7 @@ impl ZellijPlugin for State {
         for (i, row) in visible.iter().enumerate() {
             let core = match row {
                 Row::Group { name, collapsed, count, attention } => {
-                    let disc = if *collapsed { "▸" } else { "▾" };
+                    let disc = if *collapsed { "▶" } else { "▼" };
                     let icon = if *collapsed { self.icon(*attention) } else { String::new() };
                     format!("{} {}{} ({})", disc, icon, name, count)
                 }
