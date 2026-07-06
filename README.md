@@ -48,10 +48,11 @@ cp target/wasm32-wasip1/release/zellij-vtabs.wasm ~/.config/zellij/plugins/zelli
 ```
 
 Pre-seed the plugin's permissions (Zellij's in-pane grant prompt doesn't render usably in a
-narrow sidebar), in `~/.cache/zellij/permissions.kdl`:
+narrow sidebar), in `~/.cache/zellij/permissions.kdl`. Note Zellij keys this by the **resolved
+absolute** path, so use your real home dir here (not `~`):
 
 ```kdl
-"~/.config/zellij/plugins/zellij-vtabs.wasm" {
+"/home/<you>/.config/zellij/plugins/zellij-vtabs.wasm" {
     ReadApplicationState
     ChangeApplicationState
     ReadCliPipes
