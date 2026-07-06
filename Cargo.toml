@@ -1,0 +1,16 @@
+[package]
+name = "zellij-vtabs"
+version = "0.1.0"
+edition = "2021"
+description = "Zellij vertical sidebar: grouped tabs with collapse/expand"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zellij-tile = "0.44.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
