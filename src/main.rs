@@ -107,11 +107,13 @@ impl State {
             .position(|r| matches!(r, Row::Tab { active: true, .. }))
     }
 
-    /// Icon (with trailing space) for a row's attention state, or empty.
+    /// Colored icon (with trailing space) for a row's attention state, or empty.
+    /// Uses `\e[39m` (reset foreground only) so it nests inside the selection
+    /// highlight's `\e[7m…\e[0m` without terminating the reverse-video early.
     fn icon(&self, att: Option<Attention>) -> String {
         match att {
-            Some(Attention::Waiting) => format!("{} ", self.waiting_icon),
-            Some(Attention::Completed) => format!("{} ", self.completed_icon),
+            Some(Attention::Waiting) => format!("\u{1b}[33m{}\u{1b}[39m ", self.waiting_icon),
+            Some(Attention::Completed) => format!("\u{1b}[32m{}\u{1b}[39m ", self.completed_icon),
             None => String::new(),
         }
     }
@@ -197,11 +199,11 @@ impl ZellijPlugin for State {
         self.waiting_icon = configuration
             .get("waiting_icon")
             .cloned()
-            .unwrap_or_else(|| "⏳".to_string());
+            .unwrap_or_else(|| "◆".to_string());
         self.completed_icon = configuration
             .get("completed_icon")
             .cloned()
-            .unwrap_or_else(|| "✅".to_string());
+            .unwrap_or_else(|| "✓".to_string());
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
@@ -219,6 +221,19 @@ impl ZellijPlugin for State {
         match event {
             Event::TabUpdate(tabs) => {
                 self.tabs = tabs;
+                // Focusing a tab clears attention for all its panes. PaneUpdate
+                // doesn't fire on a tab switch, so this is the reliable clear path.
+                if let Some(pos) = self.tabs.iter().find(|t| t.active).map(|t| t.position) {
+                    let clear: Vec<u32> = self
+                        .pane_tab
+                        .iter()
+                        .filter(|(_, &t)| t == pos)
+                        .map(|(&p, _)| p)
+                        .collect();
+                    for p in clear {
+                        self.attention.remove(&p);
+                    }
+                }
                 if let Some(i) = self.active_row_index() {
                     self.selected = i;
                 } else {
@@ -292,7 +307,10 @@ impl ZellijPlugin for State {
             let core = match row {
                 Row::Group { name, collapsed, count, attention } => {
                     let disc = if *collapsed { "▸" } else { "▾" };
-                    format!("{} {}{} ({})", disc, self.icon(*attention), name, count)
+                    // Roll the attention icon up to the header only when collapsed;
+                    // when expanded the tabs show their own icons.
+                    let icon = if *collapsed { self.icon(*attention) } else { String::new() };
+                    format!("{} {}{} ({})", disc, icon, name, count)
                 }
                 Row::Tab { label, active, attention, .. } => {
                     let dot = if *active { "●" } else { " " };
