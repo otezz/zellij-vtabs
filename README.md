@@ -85,12 +85,17 @@ The attention icons are driven by broadcast pipes. In `~/.claude/settings.json`:
 {
   "hooks": {
     "Notification": [{ "hooks": [{ "type": "command",
-      "command": "zellij pipe --name \"zellij-vtabs::waiting::$ZELLIJ_PANE_ID\"" }] }],
+      "command": "zellij pipe --name \"zellij-vtabs::waiting::$ZELLIJ_PANE_ID\" < /dev/null" }] }],
     "Stop": [{ "hooks": [{ "type": "command",
-      "command": "zellij pipe --name \"zellij-vtabs::completed::$ZELLIJ_PANE_ID\"" }] }]
+      "command": "zellij pipe --name \"zellij-vtabs::completed::$ZELLIJ_PANE_ID\" < /dev/null" }] }]
   }
 }
 ```
+
+The `< /dev/null` is required: `zellij pipe` without a payload argument reads its payload
+from stdin until EOF, and in a hook it inherits Claude's hook-JSON stdin — which stays open
+until the hook exits, deadlocking every response for the full 60s hook timeout. Redirecting
+stdin gives it an immediate EOF.
 
 - `Notification` (Claude needs input) → `◆` on that tab
 - `Stop` (Claude finished) → `✓` on that tab
