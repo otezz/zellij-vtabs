@@ -55,35 +55,74 @@ impl State {
         rows
     }
 
-    fn handle_key(&mut self, key: KeyWithModifier) -> bool {
+    /// Activate the row at `idx`: toggle a group's collapse, or switch to a tab.
+    fn activate(&mut self, idx: usize) -> bool {
         let rows = self.build_rows();
-        if rows.is_empty() {
+        if idx >= rows.len() {
+            return false;
+        }
+        match &rows[idx] {
+            Row::Group { name, .. } => {
+                if self.collapsed.contains(name) {
+                    self.collapsed.remove(name);
+                } else {
+                    self.collapsed.insert(name.clone());
+                }
+                true
+            }
+            Row::Tab { position, .. } => {
+                // Zellij tab indices are 1-based; TabInfo.position is 0-based.
+                switch_tab_to(*position as u32 + 1);
+                true
+            }
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyWithModifier) -> bool {
+        let len = self.build_rows().len();
+        if len == 0 {
             return false;
         }
         match key.bare_key {
             BareKey::Char('j') | BareKey::Down => {
-                self.selected = (self.selected + 1).min(rows.len() - 1);
+                self.selected = (self.selected + 1).min(len - 1);
                 true
             }
             BareKey::Char('k') | BareKey::Up => {
                 self.selected = self.selected.saturating_sub(1);
                 true
             }
-            BareKey::Enter | BareKey::Char(' ') => match &rows[self.selected] {
-                Row::Group { name, .. } => {
-                    if self.collapsed.contains(name) {
-                        self.collapsed.remove(name);
-                    } else {
-                        self.collapsed.insert(name.clone());
-                    }
-                    true
+            BareKey::Enter | BareKey::Char(' ') => {
+                let sel = self.selected;
+                self.activate(sel)
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: Mouse) -> bool {
+        let len = self.build_rows().len();
+        if len == 0 {
+            return false;
+        }
+        match mouse {
+            Mouse::LeftClick(row, _col) => {
+                if row < 0 || row as usize >= len {
+                    return false;
                 }
-                Row::Tab { position, .. } => {
-                    // Zellij tab indices are 1-based; TabInfo.position is 0-based.
-                    switch_tab_to(*position as u32 + 1);
-                    false
-                }
-            },
+                let idx = row as usize;
+                self.selected = idx;
+                self.activate(idx);
+                true
+            }
+            Mouse::ScrollUp(_) => {
+                self.selected = self.selected.saturating_sub(1);
+                true
+            }
+            Mouse::ScrollDown(_) => {
+                self.selected = (self.selected + 1).min(len - 1);
+                true
+            }
             _ => false,
         }
     }
@@ -99,7 +138,7 @@ impl ZellijPlugin for State {
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
         ]);
-        subscribe(&[EventType::TabUpdate, EventType::Key]);
+        subscribe(&[EventType::TabUpdate, EventType::Key, EventType::Mouse]);
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -113,6 +152,7 @@ impl ZellijPlugin for State {
                 true
             }
             Event::Key(key) => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => false,
         }
     }
