@@ -16,11 +16,11 @@ Zellij has no native vertical tabs. This plugin renders a left sidebar showing t
 **collapsible tree grouped by name prefix**, so I can keep many tabs organized at a glance:
 
 ```
-▼ proj (3)
-    backend
-    frontend
+▼ work (3)
+    api
+    web
   ◆ infra          ← yellow ◆ = needs input
-▶ petromindo (2)   ← collapsed; ▶ would show ◆/✓ if a tab inside needs attention
+▶ side (2)         ← collapsed; ▶ would show ◆/✓ if a tab inside needs attention
 ▼ General (1)
   ● scratch        ← ● = active tab
 ```
