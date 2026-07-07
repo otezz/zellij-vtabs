@@ -15,6 +15,14 @@ const LEFT_PAD: usize = 1;
 /// calls that mutate the shared tab name.
 const MARK_WAITING: &str = " ⏳";
 const MARK_COMPLETED: &str = " ✅";
+/// Ongoing-work state (Claude is running): unlike the attention marks above it
+/// is NOT cleared on focus — it ends when a waiting/completed/clear pipe arrives.
+const MARK_WORKING: &str = " ⚙";
+
+/// Sidebar animation frames for `MARK_WORKING` (the tab name carries only the
+/// static marker; the spinner lives purely in the render).
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_INTERVAL: f64 = 0.15;
 
 /// Group order + collapse state, shared across the per-tab plugin instances and
 /// across restarts. `/cache` is mounted per plugin *location* (host side:
@@ -28,7 +36,16 @@ const STATE_FILE_PREFIX: &str = "/cache/vtabs-state-";
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Attention {
     Waiting,
+    Working,
     Completed,
+}
+
+fn marker_of(att: Attention) -> &'static str {
+    match att {
+        Attention::Waiting => MARK_WAITING,
+        Attention::Working => MARK_WORKING,
+        Attention::Completed => MARK_COMPLETED,
+    }
 }
 
 /// Fallback grouping for auto-named tabs when no `autogroup_N` rule matches.
@@ -145,9 +162,11 @@ fn derive_auto_name(
     }
 }
 
+/// Rollup priority for collapsed group headers: waiting > working > completed.
 fn merge(acc: Option<Attention>, x: Attention) -> Attention {
     match (acc, x) {
         (Some(Attention::Waiting), _) | (_, Attention::Waiting) => Attention::Waiting,
+        (Some(Attention::Working), _) | (_, Attention::Working) => Attention::Working,
         _ => Attention::Completed,
     }
 }
@@ -262,6 +281,8 @@ fn parse_attention(name: &str) -> (Option<Attention>, &str) {
         (Some(Attention::Waiting), base)
     } else if let Some(base) = name.strip_suffix(MARK_COMPLETED) {
         (Some(Attention::Completed), base)
+    } else if let Some(base) = name.strip_suffix(MARK_WORKING) {
+        (Some(Attention::Working), base)
     } else {
         (None, name)
     }
@@ -287,6 +308,9 @@ struct State {
     autogroup_rules: Vec<(String, String)>,
     /// active inline rename edit: (target, input buffer)
     renaming: Option<(RenameTarget, String)>,
+    /// spinner frame counter + whether a Timer event is already scheduled
+    spin: usize,
+    timer_running: bool,
 }
 
 enum RenameTarget {
@@ -434,8 +458,25 @@ impl State {
     fn icon(&self, att: Option<Attention>) -> String {
         match att {
             Some(Attention::Waiting) => format!("\u{1b}[33m{}\u{1b}[39m ", self.waiting_icon),
+            Some(Attention::Working) => {
+                format!("\u{1b}[36m{}\u{1b}[39m ", SPINNER[self.spin % SPINNER.len()])
+            }
             Some(Attention::Completed) => format!("\u{1b}[32m{}\u{1b}[39m ", self.completed_icon),
             None => String::new(),
+        }
+    }
+
+    fn any_working(&self) -> bool {
+        self.tabs
+            .iter()
+            .any(|t| parse_attention(&t.name).0 == Some(Attention::Working))
+    }
+
+    /// Arm the animation timer if something is working and none is scheduled.
+    fn ensure_timer(&mut self) {
+        if self.any_working() && !self.timer_running {
+            set_timeout(SPINNER_INTERVAL);
+            self.timer_running = true;
         }
     }
 
@@ -445,14 +486,47 @@ impl State {
         let Some(&tab_pos) = self.pane_tab.get(&pane_id) else {
             return;
         };
+        let Some(t) = self.tabs.iter().find(|t| t.position == tab_pos) else {
+            return;
+        };
+        let (att, base) = parse_attention(&t.name);
         // Never mark the tab you're already looking at — you don't need an
         // attention cue for it, and it keeps set/clear free of any race.
+        // But a working spinner on it still has to END now.
         if Some(tab_pos) == active {
+            if att == Some(Attention::Working) {
+                rename_tab(tab_pos as u32 + 1, base.to_string());
+            }
             return;
         }
+        rename_tab(tab_pos as u32 + 1, format!("{}{}", base, marker));
+    }
+
+    /// Mark the tab containing `pane_id` as working. Unlike attention marks
+    /// this applies to the active tab too (it is not cleared on focus, so
+    /// there is no set/clear race — only pipes ever end it).
+    fn set_working(&self, pane_id: u32) {
+        let Some(&tab_pos) = self.pane_tab.get(&pane_id) else {
+            return;
+        };
         if let Some(t) = self.tabs.iter().find(|t| t.position == tab_pos) {
-            let (_, base) = parse_attention(&t.name);
-            rename_tab(tab_pos as u32 + 1, format!("{}{}", base, marker));
+            let (att, base) = parse_attention(&t.name);
+            if att != Some(Attention::Working) {
+                rename_tab(tab_pos as u32 + 1, format!("{}{}", base, MARK_WORKING));
+            }
+        }
+    }
+
+    /// Strip a working marker (Claude exited without a Stop) — attention marks stay.
+    fn clear_working(&self, pane_id: u32) {
+        let Some(&tab_pos) = self.pane_tab.get(&pane_id) else {
+            return;
+        };
+        if let Some(t) = self.tabs.iter().find(|t| t.position == tab_pos) {
+            let (att, base) = parse_attention(&t.name);
+            if att == Some(Attention::Working) {
+                rename_tab(tab_pos as u32 + 1, base.to_string());
+            }
         }
     }
 
@@ -477,19 +551,17 @@ impl State {
         if base == name {
             return;
         }
-        let marker = match att {
-            Some(Attention::Waiting) => MARK_WAITING,
-            Some(Attention::Completed) => MARK_COMPLETED,
-            None => "",
-        };
+        let marker = att.map(marker_of).unwrap_or("");
         rename_tab(tab_pos as u32 + 1, format!("{}{}", name, marker));
     }
 
-    /// Strip the attention marker from the tab at `pos` (global rename).
+    /// Strip a *seen* attention marker from the tab at `pos` (global rename).
+    /// A working spinner survives focus — peeking at a running task must not
+    /// kill its indicator; only waiting/completed are "acknowledged by looking".
     fn clear_tab(&self, pos: usize) {
         if let Some(t) = self.tabs.iter().find(|t| t.position == pos) {
             let (att, base) = parse_attention(&t.name);
-            if att.is_some() {
+            if matches!(att, Some(Attention::Waiting) | Some(Attention::Completed)) {
                 rename_tab(pos as u32 + 1, base.to_string());
             }
         }
@@ -603,11 +675,7 @@ impl State {
             if g != old {
                 continue;
             }
-            let marker = match att {
-                Some(Attention::Waiting) => MARK_WAITING,
-                Some(Attention::Completed) => MARK_COMPLETED,
-                None => "",
-            };
+            let marker = att.map(marker_of).unwrap_or("");
             rename_tab(
                 t.position as u32 + 1,
                 format!("{}{}{}{}", new, self.separator, label, marker),
@@ -629,11 +697,7 @@ impl State {
         if new_label.is_empty() || new_label == old_label {
             return;
         }
-        let marker = match att {
-            Some(Attention::Waiting) => MARK_WAITING,
-            Some(Attention::Completed) => MARK_COMPLETED,
-            None => "",
-        };
+        let marker = att.map(marker_of).unwrap_or("");
         let name = if base.find(self.separator).is_none() {
             new_label.to_string()
         } else {
@@ -788,6 +852,7 @@ impl ZellijPlugin for State {
             EventType::PaneUpdate,
             EventType::Key,
             EventType::Mouse,
+            EventType::Timer,
         ]);
     }
 
@@ -821,7 +886,18 @@ impl ZellijPlugin for State {
                         self.selected = len - 1;
                     }
                 }
+                self.ensure_timer();
                 true
+            }
+            Event::Timer(_) => {
+                self.timer_running = false;
+                if self.any_working() {
+                    self.spin = self.spin.wrapping_add(1);
+                    self.ensure_timer();
+                    true
+                } else {
+                    false
+                }
             }
             Event::PaneUpdate(manifest) => {
                 self.pane_tab.clear();
@@ -862,6 +938,14 @@ impl ZellijPlugin for State {
                         }
                         "cwd-force" => {
                             self.auto_rename(pane_id, payload, true);
+                            return false;
+                        }
+                        "working" => {
+                            self.set_working(pane_id);
+                            return false;
+                        }
+                        "clear-working" => {
+                            self.clear_working(pane_id);
                             return false;
                         }
                         _ => {}
@@ -988,7 +1072,16 @@ mod tests {
     fn parse_attention_variants() {
         assert_eq!(parse_attention("work:api ⏳"), (Some(Attention::Waiting), "work:api"));
         assert_eq!(parse_attention("db ✅"), (Some(Attention::Completed), "db"));
+        assert_eq!(parse_attention("run ⚙"), (Some(Attention::Working), "run"));
         assert_eq!(parse_attention("plain"), (None, "plain"));
+    }
+
+    #[test]
+    fn markers_roundtrip_for_all_states() {
+        for att in [Attention::Waiting, Attention::Working, Attention::Completed] {
+            let name = format!("x:y{}", marker_of(att));
+            assert_eq!(parse_attention(&name), (Some(att), "x:y"));
+        }
     }
 
     #[test]
@@ -1006,10 +1099,14 @@ mod tests {
     }
 
     #[test]
-    fn merge_waiting_wins() {
+    fn merge_priority_waiting_working_completed() {
         assert_eq!(merge(Some(Attention::Completed), Attention::Waiting), Attention::Waiting);
         assert_eq!(merge(Some(Attention::Waiting), Attention::Completed), Attention::Waiting);
+        assert_eq!(merge(Some(Attention::Working), Attention::Waiting), Attention::Waiting);
+        assert_eq!(merge(Some(Attention::Completed), Attention::Working), Attention::Working);
+        assert_eq!(merge(Some(Attention::Working), Attention::Completed), Attention::Working);
         assert_eq!(merge(None, Attention::Completed), Attention::Completed);
+        assert_eq!(merge(None, Attention::Working), Attention::Working);
     }
 
     #[test]

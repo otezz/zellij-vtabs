@@ -43,6 +43,10 @@ finished one, and `●` marks the active tab.
 - **Attention icons** — `◆` (yellow, needs input) and `✓` (green, done), appearing on the
   tab and **rolling up to a collapsed group's header**. Cleared automatically when I focus
   the tab. Wired to Claude Code's `Notification`/`Stop` hooks.
+- **Working spinner** — an animated cyan spinner while Claude is running in a tab (wired
+  to the `UserPromptSubmit` hook). Unlike the attention icons it shows on the active tab
+  too and is *not* cleared by focusing — it ends when Claude needs input, finishes, or
+  exits (`SessionEnd`). Rolls up to collapsed group headers (waiting > working > done).
 
 ## Requirements
 
@@ -98,10 +102,14 @@ The attention icons are driven by broadcast pipes. In `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "Notification": [{ "hooks": [{ "type": "command",
-      "command": "zellij pipe --name \"zellij-vtabs::waiting::$ZELLIJ_PANE_ID\" < /dev/null" }] }],
-    "Stop": [{ "hooks": [{ "type": "command",
-      "command": "zellij pipe --name \"zellij-vtabs::completed::$ZELLIJ_PANE_ID\" < /dev/null" }] }]
+    "Notification": [{ "hooks": [{ "type": "command", "timeout": 3,
+      "command": "timeout 3 zellij pipe --name \"zellij-vtabs::waiting::$ZELLIJ_PANE_ID\" < /dev/null" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "timeout": 3,
+      "command": "timeout 3 zellij pipe --name \"zellij-vtabs::completed::$ZELLIJ_PANE_ID\" < /dev/null" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "timeout": 3,
+      "command": "timeout 3 zellij pipe --name \"zellij-vtabs::working::$ZELLIJ_PANE_ID\" < /dev/null" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "timeout": 3,
+      "command": "timeout 3 zellij pipe --name \"zellij-vtabs::clear-working::$ZELLIJ_PANE_ID\" < /dev/null" }] }]
   }
 }
 ```
@@ -111,13 +119,16 @@ from stdin until EOF, and in a hook it inherits Claude's hook-JSON stdin — whi
 until the hook exits, deadlocking every response for the full 60s hook timeout. Redirecting
 stdin gives it an immediate EOF.
 
+- `UserPromptSubmit` (Claude starts working) → animated spinner on that tab
 - `Notification` (Claude needs input) → `◆` on that tab
-- `Stop` (Claude finished) → `✓` on that tab
-- Focusing the tab clears it
+- `Stop` (Claude finished) → `✓` on that tab (or just ends the spinner if you're on it)
+- `SessionEnd` (Claude exits) → ends a leftover spinner
+- Focusing the tab clears `◆`/`✓`; the spinner survives focus and ends via the hooks above
 
-Consider adding `"timeout": 3` to these hooks: `zellij pipe` blocks forever when the
-session it runs in has no vtabs plugin listening (a session without this layout), and the
-stdin redirect does not help with that.
+Both timeouts matter: `zellij pipe` blocks forever when the session it runs in has no
+vtabs plugin listening (a session without this layout) — the stdin redirect does not
+cover that, the hook-level `"timeout"` only stops Claude waiting, and the coreutils
+`timeout 3` is what actually kills the stuck process.
 
 Manual test — note it must target a **non-active** tab (the plugin never marks the tab you're
 currently on, by design):
