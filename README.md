@@ -50,8 +50,14 @@ finished one, and `●` marks the active tab.
 
 ## Requirements
 
-- **Zellij 0.44.2** (the `zellij-tile` dependency is pinned to this exact version — see notes)
-- **Rust** + `cargo`, with the `wasm32-wasip1` target: `rustup target add wasm32-wasip1`
+- **Zellij ≥ the `zellij-tile` version the wasm was built with** — release builds use
+  `0.44.2`, and the prebuilt wasm is verified working on Zellij **0.43.1, 0.44.2, and
+  0.44.3** (the protobuf plugin API tolerates version skew in both directions better than
+  Zellij's error messages suggest; a plugin built against a *newer* `zellij-tile` than the
+  running Zellij is the combination that reliably fails).
+- **Building from source:** Rust + `cargo` with the `wasm32-wasip1` target
+  (`rustup target add wasm32-wasip1`), and keep the `zellij-tile` pin **at or below** your
+  Zellij version — don't use a caret/range requirement, Cargo resolves those upward.
 
 ## Build & install
 
@@ -233,8 +239,10 @@ focused (visible) instance ever writes, so the sidebar you're looking at is alwa
 
 Two build gotchas on modern Rust + Zellij:
 
-1. **Pin `zellij-tile` to the exact running Zellij version** (`= 0.44.2`). A caret range grabs a
-   newer patch whose plugin ABI the runtime rejects (`could not find exported function`).
+1. **Pin `zellij-tile` exactly, at or below the oldest Zellij you target** (`= 0.44.2`). A
+   caret range grabs the newest patch, and a plugin built against a newer `zellij-tile`
+   than the running Zellij fails to load (`could not find exported function`). The reverse
+   direction is fine — an older-tile build runs on newer Zellij.
 2. **Build as a binary crate, not `cdylib`.** On current Rust, a `cdylib` for `wasm32-wasip1`
    emits a WASI *reactor* (no `_start`); Zellij needs a *command* (`_start`). A bin crate lets
    `register_plugin!`'s own `main` become `_start`. (Don't add your own `fn main` — the macro
