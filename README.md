@@ -239,7 +239,7 @@ plugin location="file:~/.config/zellij/plugins/zellij-vtabs.wasm" {
 
 ![working spinner](docs/spinner.svg)
 
-Compare animation candidates on the **[live preview page](https://otezz.github.io/zellij-vtabs/)**
+Compare animation candidates on the **[live preview page](https://otezz.github.io/zellij-vtabs/spinner.html)**
 (every set spinning inside a mock sidebar row), copy the frames you like, and set them via
 the `spinner` config key. Width-1 glyphs only — emoji frames are double-width and break
 the sidebar's column math.

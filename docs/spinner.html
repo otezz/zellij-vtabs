@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zellij-vtabs · spinner preview</title>
+<style>
+  :root {
+    --bg: #f2f4f5;
+    --ink: #22303a;
+    --muted: #5d707d;
+    --card: #ffffff;
+    --card-edge: #d8dfe3;
+    --term-bg: #10161b;
+    --term-ink: #cfd9e0;
+    --term-dim: #5c6b76;
+    --cyan: #4fd1e0;
+    --yellow: #e0b34a;
+    --green: #62c96a;
+    --accent: #0d94a6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1217;
+      --ink: #d6dee6;
+      --muted: #8195a1;
+      --card: #151c22;
+      --card-edge: #253039;
+      --accent: #4fd1e0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 2.5rem 1.25rem 4rem;
+  }
+  main { max-width: 1060px; margin: 0 auto; }
+  .crumb {
+    font: .8rem/1 ui-monospace, "Cascadia Mono", Menlo, monospace;
+    margin: 0 0 1.5rem; color: var(--muted);
+  }
+  .crumb a { color: var(--accent); text-decoration: none; }
+  .crumb a:hover { text-decoration: underline; }
+  h1 {
+    font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, monospace;
+    font-size: 1.35rem;
+    letter-spacing: .01em;
+    margin: 0 0 .35rem;
+    text-wrap: balance;
+  }
+  .sub { color: var(--muted); margin: 0 0 1.75rem; max-width: 62ch; }
+  .controls {
+    display: flex; align-items: center; gap: .75rem; flex-wrap: wrap;
+    margin: 0 0 1.5rem;
+  }
+  .controls .label {
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--muted);
+  }
+  .seg { display: inline-flex; border: 1px solid var(--card-edge); border-radius: 6px; overflow: hidden; }
+  .seg button {
+    font: 600 .8rem/1 ui-monospace, Menlo, monospace;
+    padding: .45rem .8rem; border: 0; background: var(--card); color: var(--muted);
+    cursor: pointer;
+  }
+  .seg button + button { border-left: 1px solid var(--card-edge); }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--term-bg); }
+  .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .grid {
+    display: grid; gap: 1rem;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--card-edge);
+    border-radius: 8px;
+    padding: .9rem .9rem .8rem;
+    display: flex; flex-direction: column; gap: .65rem;
+  }
+  .card.current { border-color: var(--accent); }
+  .card h2 {
+    font: 600 .9rem/1.2 system-ui, sans-serif;
+    margin: 0; display: flex; align-items: baseline; gap: .5rem;
+  }
+  .badge {
+    font: 600 .62rem/1 ui-monospace, Menlo, monospace;
+    text-transform: uppercase; letter-spacing: .08em;
+    color: var(--term-bg); background: var(--accent);
+    padding: .2rem .4rem; border-radius: 4px;
+  }
+  .frames {
+    font: .78rem/1.4 ui-monospace, "Cascadia Mono", Menlo, monospace;
+    color: var(--muted);
+    overflow-x: auto; white-space: nowrap;
+  }
+  /* The terminal mock stays dark in both themes on purpose — that's where it will live. */
+  .term {
+    background: var(--term-bg);
+    color: var(--term-ink);
+    border-radius: 6px;
+    padding: .7rem .85rem;
+    font: .92rem/1.65 ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, monospace;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .term .dim { color: var(--term-dim); }
+  .term .spin { color: var(--cyan); }
+  .term .wait { color: var(--yellow); }
+  .term .done { color: var(--green); }
+  .card .actions { display: flex; justify-content: flex-end; }
+  .copy {
+    font: 600 .72rem/1 ui-monospace, Menlo, monospace;
+    color: var(--accent); background: none; border: 1px solid var(--card-edge);
+    border-radius: 5px; padding: .35rem .6rem; cursor: pointer;
+  }
+  .copy:hover { border-color: var(--accent); }
+  .copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  section.how { margin-top: 2.5rem; max-width: 72ch; }
+  section.how h2 { font-size: 1.05rem; margin: 0 0 .5rem; }
+  section.how p { color: var(--muted); margin: .4rem 0; }
+  pre.snippet {
+    background: var(--term-bg); color: var(--term-ink);
+    border-radius: 6px; padding: .7rem .85rem;
+    font: .85rem/1.5 ui-monospace, Menlo, monospace;
+    overflow-x: auto;
+  }
+</style>
+</head>
+<body>
+<main>
+  <p class="crumb"><a href="./">← zellij-vtabs</a> / spinner preview</p>
+  <h1>spinner preview</h1>
+  <p class="sub">Pick the animation for the working indicator. Each card is a mock of the
+  sidebar: the spinner runs between a <span style="color:var(--yellow)">◆ waiting</span>
+  and a <span style="color:var(--green)">✓ done</span> row so you can judge centering and
+  weight in context. All sets are width-1 glyphs — emoji sets are width-2 and would break
+  the sidebar's column math. Your browser's monospace font differs from your terminal
+  font: shortlist here, confirm in the terminal (snippet below).</p>
+
+  <div class="controls">
+    <span class="label">Interval</span>
+    <div class="seg" role="group" aria-label="animation interval">
+      <button data-ms="100">100 ms</button>
+      <button data-ms="150" aria-pressed="true">150 ms</button>
+      <button data-ms="250">250 ms</button>
+    </div>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <section class="how">
+    <h2>Use your pick</h2>
+    <p>Copy a card's frames and set them in the layout's plugin config — each character is
+    one animation frame (the default is <code>dots-dense</code>):</p>
+    <pre class="snippet">plugin location="file:~/.config/zellij/plugins/zellij-vtabs.wasm" {
+    spinner "⣾⣽⣻⢿⡿⣟⣯⣷"
+}</pre>
+    <p>Layout config is read at plugin load, so start a fresh session to see it.</p>
+    <p>To check a set in your real terminal font first (Ctrl+C to stop):</p>
+    <pre class="snippet">frames='⣾⣽⣻⢿⡿⣟⣯⣷'; while true; do
+  for c in ${(s::)frames}; do printf '\r  \033[36m%s\033[0m working…' "$c"; sleep 0.15; done
+done</pre>
+  </section>
+</main>
+<script>
+  const SETS = [
+    { name: "dots-dense", frames: "⣾⣽⣻⢿⡿⣟⣯⣷", current: true },
+    { name: "dots-sparse", frames: "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" },
+    { name: "orbit-dot", frames: "⠁⠂⠄⡀⢀⠠⠐⠈" },
+    { name: "circle-quarters", frames: "◐◓◑◒" },
+    { name: "pie", frames: "◴◷◶◵" },
+    { name: "arc", frames: "◜◠◝◞◡◟" },
+    { name: "triangle", frames: "◢◣◤◥" },
+    { name: "quadrant", frames: "▘▝▗▖" },
+    { name: "bar-pulse", frames: "▁▃▄▅▆▇█▇▆▅▄▃" },
+    { name: "line", frames: "|/-\\" },
+    { name: "toggle", frames: "◍◌" },
+  ];
+  const grid = document.getElementById("grid");
+  const spinEls = [];
+  for (const s of SETS) {
+    const frames = [...s.frames];
+    const card = document.createElement("div");
+    card.className = "card" + (s.current ? " current" : "");
+    card.innerHTML =
+      '<h2>' + s.name + (s.current ? ' <span class="badge">default</span>' : "") + "</h2>" +
+      '<div class="frames">' + frames.join(" ") + "</div>" +
+      '<div class="term"><span class="dim">▼</span> work <span class="dim">(3)</span>\n' +
+      '    <span class="wait">◆</span> worker\n' +
+      '  <span class="dim">●</span> <span class="spin"></span> api\n' +
+      '    <span class="done">✓</span> deploy</div>' +
+      '<div class="actions"><button class="copy">copy frames</button></div>';
+    card.querySelector(".copy").addEventListener("click", async (e) => {
+      await navigator.clipboard.writeText(s.frames);
+      e.target.textContent = "copied ✓";
+      setTimeout(() => (e.target.textContent = "copy frames"), 1200);
+    });
+    grid.appendChild(card);
+    spinEls.push({ el: card.querySelector(".spin"), frames });
+  }
+  let tick = 0, timer = null;
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function paint() {
+    for (const s of spinEls) s.el.textContent = s.frames[tick % s.frames.length];
+  }
+  function start(ms) {
+    clearInterval(timer);
+    paint();
+    if (!reduced) timer = setInterval(() => { tick++; paint(); }, ms);
+  }
+  document.querySelectorAll(".seg button").forEach((b) =>
+    b.addEventListener("click", () => {
+      document.querySelectorAll(".seg button").forEach((x) => x.setAttribute("aria-pressed", "false"));
+      b.setAttribute("aria-pressed", "true");
+      start(+b.dataset.ms);
+    })
+  );
+  start(150);
+</script>
+</body>
+</html>
