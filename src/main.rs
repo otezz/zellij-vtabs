@@ -21,7 +21,9 @@ const MARK_WORKING: &str = " ⚙";
 
 /// Sidebar animation frames for `MARK_WORKING` (the tab name carries only the
 /// static marker; the spinner lives purely in the render).
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Dense braille frames (7 of 8 dots lit) — fills the cell evenly, unlike the
+/// sparse ⠋⠙⠹ set which sits visibly high-and-left next to ◆/✓.
+const SPINNER: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 const SPINNER_INTERVAL: f64 = 0.15;
 
 /// Group order + collapse state, shared across the per-tab plugin instances and
