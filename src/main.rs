@@ -118,6 +118,9 @@ fn derive_auto_name(
     } else {
         basename(&f.cwd)
     };
+    if label.is_empty() {
+        return None; // e.g. cwd = "/" — never produce an empty name
+    }
     let rule_group = rules.iter().find_map(|(pattern, group)| {
         (f.cwd == pattern.trim_end_matches("/**") || glob_match::glob_match(pattern, &f.cwd))
             .then_some(group.as_str())
@@ -134,7 +137,10 @@ fn derive_auto_name(
             };
             Some(format!("{}:{}", basename(owner), label))
         }
-        (None, AutoDefault::Dir) => Some(basename(&f.cwd).to_string()),
+        (None, AutoDefault::Dir) => {
+            let name = basename(&f.cwd);
+            (!name.is_empty()).then(|| name.to_string())
+        }
         (None, AutoDefault::Off) => None,
     }
 }
@@ -146,7 +152,6 @@ fn merge(acc: Option<Attention>, x: Attention) -> Attention {
     }
 }
 
-/// Split the attention marker off a tab name: "work:api ⏳" -> (Waiting, "work:api").
 /// Persisted sidebar state: group display order, collapsed groups, and — only
 /// for groups the user explicitly reordered tabs in — per-group tab label order.
 /// Groups absent from `tab_order` keep following Zellij's native tab positions.
@@ -251,6 +256,7 @@ fn move_in(order: &mut [String], name: &str, delta: isize) -> bool {
     true
 }
 
+/// Split the attention marker off a tab name: "work:api ⏳" -> (Waiting, "work:api").
 fn parse_attention(name: &str) -> (Option<Attention>, &str) {
     if let Some(base) = name.strip_suffix(MARK_WAITING) {
         (Some(Attention::Waiting), base)
@@ -573,6 +579,9 @@ impl State {
                 *g = new.to_string();
             }
         }
+        // renaming into an existing group must not leave a duplicate entry
+        let mut seen = BTreeSet::new();
+        self.group_order.retain(|g| seen.insert(g.clone()));
         if self.collapsed.remove(old) {
             self.collapsed.insert(new.to_string());
         }
@@ -1166,6 +1175,19 @@ mod tests {
         assert!(s.collapsed.contains("proj") && !s.collapsed.contains("work"));
         assert_eq!(s.tab_order.get("proj"), Some(&vec!["api".to_string()]));
         assert!(!s.tab_order.contains_key("work"));
+        // renaming into an existing group must not duplicate it in the order
+        s.migrate_group_state("proj", "misc");
+        assert_eq!(s.group_order, vec!["misc"]);
+    }
+
+    #[test]
+    fn derive_never_produces_empty_names() {
+        use AutoDefault::*;
+        assert_eq!(derive_auto_name(Repo, &[], &facts("", "", "", "")), None);
+        assert_eq!(derive_auto_name(Dir, &[], &facts("", "", "", "")), None);
+        let rules = vec![("/**".to_string(), "g".to_string())];
+        // basename of "" (parse_facts trims "/" to "") — no "g:" ghost tab
+        assert_eq!(derive_auto_name(Off, &rules, &facts("", "", "", "")), None);
     }
 
     #[test]

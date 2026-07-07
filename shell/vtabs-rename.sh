@@ -4,7 +4,10 @@
 #
 # Usage: vtabs-rename.sh [force]
 #   default — rename only if the tab still has a default "Tab #N" name
-#   force   — rename even a manually-named tab (used by the Claude worktree hook)
+#   force   — rename even a manually-named tab, but ONLY when inside a linked
+#             git worktree (used by the Claude SessionStart hook: `claude -w X`
+#             should label the tab, a plain `claude` in a repo must not clobber
+#             a name you chose). Outside a worktree, force degrades to default.
 #
 # Callers:
 #   ~/.zshrc:                (~/.config/zellij/vtabs-rename.sh &) 2>/dev/null
@@ -14,11 +17,12 @@
 # listening in this session (e.g. a session without the vtabs layout).
 [ -n "$ZELLIJ" ] && [ -n "$ZELLIJ_PANE_ID" ] || exit 0
 mode=cwd
-[ "$1" = force ] && mode=cwd-force
 facts="cwd=$PWD"
 if toplevel=$(git rev-parse --path-format=absolute --show-toplevel 2>/dev/null); then
     common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
     branch=$(git symbolic-ref --short HEAD 2>/dev/null)
     facts=$(printf '%s\ntoplevel=%s\ncommon=%s\nbranch=%s' "$facts" "$toplevel" "$common" "$branch")
+    # force only ever applies inside a linked worktree (common dir lives outside it)
+    [ "$1" = force ] && [ "$common" != "$toplevel/.git" ] && mode=cwd-force
 fi
 exec timeout 3 zellij pipe --name "zellij-vtabs::$mode::$ZELLIJ_PANE_ID" -- "$facts" </dev/null
