@@ -231,6 +231,13 @@ fn merge_order(saved: &[String], appearance: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Rename the first occurrence of `old` in a saved label order.
+fn rename_label(order: &mut [String], old: &str, new: &str) {
+    if let Some(l) = order.iter_mut().find(|l| l.as_str() == old) {
+        *l = new.to_string();
+    }
+}
+
 /// Swap `name` with its neighbor `delta` steps away; false if absent or at the edge.
 fn move_in(order: &mut [String], name: &str, delta: isize) -> bool {
     let Some(i) = order.iter().position(|g| g == name) else {
@@ -272,8 +279,14 @@ struct State {
     completed_icon: String,
     autogroup_default: AutoDefault,
     autogroup_rules: Vec<(String, String)>,
-    /// active group-rename edit: (original group name, input buffer)
-    renaming: Option<(String, String)>,
+    /// active inline rename edit: (target, input buffer)
+    renaming: Option<(RenameTarget, String)>,
+}
+
+enum RenameTarget {
+    Group(String),
+    /// tab position; edits the tab's label (group prefix is kept)
+    Tab(usize),
 }
 
 // The plugin entry points call zellij-tile's wasm host imports, which don't exist
@@ -595,15 +608,47 @@ impl State {
         self.save_state();
     }
 
+    /// Rename the label of the tab at `position`, keeping its group prefix
+    /// (ungrouped tabs stay ungrouped) and attention mark.
+    fn commit_tab_rename(&mut self, position: usize, new_label: &str) {
+        let new_label = new_label.trim();
+        let Some(t) = self.tabs.iter().find(|t| t.position == position) else {
+            return;
+        };
+        let (att, base) = parse_attention(&t.name);
+        let (g, old_label) = self.group_of(base);
+        if new_label.is_empty() || new_label == old_label {
+            return;
+        }
+        let marker = match att {
+            Some(Attention::Waiting) => MARK_WAITING,
+            Some(Attention::Completed) => MARK_COMPLETED,
+            None => "",
+        };
+        let name = if base.find(self.separator).is_none() {
+            new_label.to_string()
+        } else {
+            format!("{}{}{}", g, self.separator, new_label)
+        };
+        rename_tab(position as u32 + 1, format!("{}{}", name, marker));
+        if let Some(order) = self.tab_order.get_mut(&g) {
+            rename_label(order, old_label, new_label);
+            self.save_state();
+        }
+    }
+
     fn handle_rename_key(&mut self, key: KeyWithModifier) -> bool {
-        let Some((old, mut buf)) = self.renaming.take() else {
+        let Some((target, mut buf)) = self.renaming.take() else {
             return false;
         };
         let plain = key.key_modifiers.is_empty()
             || (key.key_modifiers.len() == 1 && key.key_modifiers.contains(&KeyModifier::Shift));
         match key.bare_key {
             BareKey::Enter => {
-                self.commit_rename(&old, &buf);
+                match &target {
+                    RenameTarget::Group(old) => self.commit_rename(&old.clone(), &buf),
+                    RenameTarget::Tab(pos) => self.commit_tab_rename(*pos, &buf),
+                }
                 return true;
             }
             BareKey::Esc => return true, // buffer dropped = cancelled
@@ -616,7 +661,7 @@ impl State {
             }
             _ => {}
         }
-        self.renaming = Some((old, buf));
+        self.renaming = Some((target, buf));
         true
     }
 
@@ -649,11 +694,18 @@ impl State {
             }
             BareKey::Char('r') => {
                 let rows = self.build_rows();
-                if let Some(Row::Group { name, .. }) = rows.get(self.selected) {
-                    self.renaming = Some((name.clone(), name.clone()));
-                    true
-                } else {
-                    false
+                match rows.get(self.selected) {
+                    Some(Row::Group { name, .. }) => {
+                        self.renaming =
+                            Some((RenameTarget::Group(name.clone()), name.clone()));
+                        true
+                    }
+                    Some(Row::Tab { position, label, .. }) => {
+                        self.renaming =
+                            Some((RenameTarget::Tab(*position), label.clone()));
+                        true
+                    }
+                    None => false,
                 }
             }
             _ => false,
@@ -827,16 +879,28 @@ impl ZellijPlugin for State {
             let core = match row {
                 Row::Group { name, collapsed, count, attention } => {
                     let disc = if *collapsed { "▶" } else { "▼" };
-                    if let Some((_, buf)) = self.renaming.as_ref().filter(|(o, _)| o == name) {
+                    let editing = match &self.renaming {
+                        Some((RenameTarget::Group(o), buf)) if o == name => Some(buf),
+                        _ => None,
+                    };
+                    if let Some(buf) = editing {
                         format!("{} {}▏", disc, buf)
                     } else {
                         let icon = if *collapsed { self.icon(*attention) } else { String::new() };
                         format!("{} {}{} ({})", disc, icon, name, count)
                     }
                 }
-                Row::Tab { label, active, attention, .. } => {
+                Row::Tab { position, label, active, attention } => {
                     let dot = if *active { "●" } else { " " };
-                    format!("  {} {}{}", dot, self.icon(*attention), label)
+                    let editing = match &self.renaming {
+                        Some((RenameTarget::Tab(p), buf)) if p == position => Some(buf),
+                        _ => None,
+                    };
+                    if let Some(buf) = editing {
+                        format!("  {} {}▏", dot, buf)
+                    } else {
+                        format!("  {} {}{}", dot, self.icon(*attention), label)
+                    }
                 }
             };
             let line = truncate_visible(&format!("{}{}", pad, core), cols);
@@ -1102,6 +1166,15 @@ mod tests {
         assert!(s.collapsed.contains("proj") && !s.collapsed.contains("work"));
         assert_eq!(s.tab_order.get("proj"), Some(&vec!["api".to_string()]));
         assert!(!s.tab_order.contains_key("work"));
+    }
+
+    #[test]
+    fn rename_label_first_match_only() {
+        let mut order = vec!["a".to_string(), "b".to_string(), "a".to_string()];
+        rename_label(&mut order, "a", "z");
+        assert_eq!(order, vec!["z", "b", "a"]);
+        rename_label(&mut order, "missing", "x");
+        assert_eq!(order, vec!["z", "b", "a"]);
     }
 
     #[test]

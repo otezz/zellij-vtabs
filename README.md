@@ -31,8 +31,9 @@ finished one, and `●` marks the active tab.
 - **Persistent state** — group order, tab order, and collapse state survive session
   restarts and stay in sync across every tab's sidebar (stored per session in the plugin's
   cache dir).
-- **Rename a group** — `r` on a group header opens an inline editor (`Enter` commits,
-  `Esc` cancels); every member tab is re-prefixed and the group's saved state follows.
+- **Rename inline** — `r` opens an inline editor (`Enter` commits, `Esc` cancels): on a
+  group header it renames the group (every member tab is re-prefixed, saved state
+  follows); on a tab row it renames the tab's label, keeping its group.
 - **Auto-grouping (opt-in)** — a small shell script pipes each pane's starting directory
   (+ git facts) to the plugin, which auto-names still-default tabs (`repo:branch`,
   `repo:worktree`, …) by configurable rules. Manual names always win. See below.
