@@ -59,6 +59,39 @@ finished one, and `●` marks the active tab.
   (`rustup target add wasm32-wasip1`), and keep the `zellij-tile` pin **at or below** your
   Zellij version — don't use a caret/range requirement, Cargo resolves those upward.
 
+## Quick try (zero install)
+
+Zellij can load the plugin straight from the release URL — no download, no Rust. Save
+this as `try-vtabs.kdl`:
+
+```kdl
+layout {
+    pane split_direction="vertical" {
+        pane size=28 borderless=true {
+            plugin location="https://github.com/otezz/zellij-vtabs/releases/latest/download/zellij-vtabs.wasm"
+        }
+        pane
+    }
+    pane size=1 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}
+```
+
+Pre-seed the permissions in `~/.cache/zellij/permissions.kdl` (the in-pane grant prompt
+doesn't render usably in a 28-column sidebar):
+
+```kdl
+"https://github.com/otezz/zellij-vtabs/releases/latest/download/zellij-vtabs.wasm" {
+    ReadApplicationState
+    ChangeApplicationState
+    ReadCliPipes
+}
+```
+
+Then: `zellij --new-session-with-layout ./try-vtabs.kdl`. Zellij caches the download, so
+this also survives offline use. Name a couple of tabs `group:label` and you have the tree.
+
 ## Build & install
 
 ```bash
