@@ -19,12 +19,29 @@ const MARK_COMPLETED: &str = " ✅";
 /// is NOT cleared on focus — it ends when a waiting/completed/clear pipe arrives.
 const MARK_WORKING: &str = " ⚙";
 
-/// Sidebar animation frames for `MARK_WORKING` (the tab name carries only the
-/// static marker; the spinner lives purely in the render).
-/// Dense braille frames (7 of 8 dots lit) — fills the cell evenly, unlike the
-/// sparse ⠋⠙⠹ set which sits visibly high-and-left next to ◆/✓.
-const SPINNER: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+/// Default sidebar animation frames for `MARK_WORKING` (the tab name carries
+/// only the static marker; the spinner lives purely in the render). Dense
+/// braille (7 of 8 dots lit) fills the cell evenly, unlike the sparse ⠋⠙⠹ set
+/// which sits visibly high-and-left next to ◆/✓. Override with the `spinner`
+/// config key (each char = one frame; width-1 glyphs only).
+const SPINNER_DEFAULT: &str = "⣾⣽⣻⢿⡿⣟⣯⣷";
 const SPINNER_INTERVAL: f64 = 0.15;
+
+/// Each char of the `spinner` config value is one animation frame.
+fn parse_spinner(config: Option<&String>) -> Vec<String> {
+    let frames: Vec<String> = config
+        .map(String::as_str)
+        .unwrap_or(SPINNER_DEFAULT)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(String::from)
+        .collect();
+    if frames.is_empty() {
+        SPINNER_DEFAULT.chars().map(String::from).collect()
+    } else {
+        frames
+    }
+}
 
 /// Group order + collapse state, shared across the per-tab plugin instances and
 /// across restarts. `/cache` is mounted per plugin *location* (host side:
@@ -310,7 +327,9 @@ struct State {
     autogroup_rules: Vec<(String, String)>,
     /// active inline rename edit: (target, input buffer)
     renaming: Option<(RenameTarget, String)>,
-    /// spinner frame counter + whether a Timer event is already scheduled
+    /// animation frames (from the `spinner` config key), frame counter, and
+    /// whether a Timer event is already scheduled
+    spinner: Vec<String>,
     spin: usize,
     timer_running: bool,
 }
@@ -461,7 +480,12 @@ impl State {
         match att {
             Some(Attention::Waiting) => format!("\u{1b}[33m{}\u{1b}[39m ", self.waiting_icon),
             Some(Attention::Working) => {
-                format!("\u{1b}[36m{}\u{1b}[39m ", SPINNER[self.spin % SPINNER.len()])
+                let frame = self
+                    .spinner
+                    .get(self.spin % self.spinner.len().max(1))
+                    .map(String::as_str)
+                    .unwrap_or("⣾");
+                format!("\u{1b}[36m{}\u{1b}[39m ", frame)
             }
             Some(Attention::Completed) => format!("\u{1b}[32m{}\u{1b}[39m ", self.completed_icon),
             None => String::new(),
@@ -843,6 +867,7 @@ impl ZellijPlugin for State {
             _ => AutoDefault::Off,
         };
         self.autogroup_rules = parse_autogroup_rules(&configuration);
+        self.spinner = parse_spinner(configuration.get("spinner"));
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
@@ -1259,6 +1284,14 @@ mod tests {
         // off + no match: leave alone
         assert_eq!(derive_auto_name(Off, &[], &facts("/tmp/x", "", "", "")), None);
         assert_eq!(derive_auto_name(Off, &[], &CwdFacts::default()), None);
+    }
+
+    #[test]
+    fn parse_spinner_splits_chars_with_default_fallback() {
+        assert_eq!(parse_spinner(Some(&"◐◓◑◒".to_string())), vec!["◐", "◓", "◑", "◒"]);
+        let default: Vec<String> = SPINNER_DEFAULT.chars().map(String::from).collect();
+        assert_eq!(parse_spinner(None), default);
+        assert_eq!(parse_spinner(Some(&"  ".to_string())), default); // whitespace-only
     }
 
     #[test]

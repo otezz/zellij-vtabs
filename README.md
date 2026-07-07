@@ -188,12 +188,22 @@ Optional plugin config in the layout's `plugin` block (defaults shown):
 
 ```kdl
 plugin location="file:~/.config/zellij/plugins/zellij-vtabs.wasm" {
-    separator ":"        // tab-name group separator
-    waiting_icon "◆"     // rendered yellow
-    completed_icon "✓"   // rendered green
+    separator ":"          // tab-name group separator
+    waiting_icon "◆"       // rendered yellow
+    completed_icon "✓"     // rendered green
+    spinner "⣾⣽⣻⢿⡿⣟⣯⣷"    // working animation: each char = one frame
     // plus the autogroup_* keys described above
 }
 ```
+
+### Spinner
+
+![working spinner](docs/spinner.svg)
+
+Compare animation candidates on the **[live preview page](https://otezz.github.io/zellij-vtabs/)**
+(every set spinning inside a mock sidebar row), copy the frames you like, and set them via
+the `spinner` config key. Width-1 glyphs only — emoji frames are double-width and break
+the sidebar's column math.
 
 ## Architecture notes (why it's built this way)
 

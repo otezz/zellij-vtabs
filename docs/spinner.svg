@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="44" viewBox="0 0 220 44" role="img" aria-label="animated working spinner next to a tab label">
+  <rect width="220" height="44" rx="6" fill="#10161b"/>
+  <text x="16" y="29" font-family="Menlo,Consolas,monospace" font-size="17" fill="#5c6b76">●</text>
+  <g font-family="Menlo,Consolas,monospace" font-size="17" fill="#4fd1e0">
+    <text x="38" y="29" opacity="0">⣾<animate attributeName="opacity" values="1;0;0;0;0;0;0;0" dur="1.2s" calcMode="discrete" repeatCount="indefinite"/></text>
+    <text x="38" y="29" opacity="0">⣽<animate attributeName="opacity" values="0;1;0;0;0;0;0;0" dur="1.2s" calcMode="discrete" repeatCount="indefinite"/></text>
+    <text x="38" y="29" opacity="0">⣻<animate attributeName="opacity" values="0;0;1;0;0;0;0;0" dur="1.2s" calcMode="discrete" repeatCount="indefinite"/></text>
+    <text x="38" y="29" opacity="0">⢿<animate attributeName="opacity" values="0;0;0;1;0;0;0;0" dur="1.2s" calcMode="discrete" repeatCount="indefinite"/></text>
+    <text x="38" y="29" opacity="0">⡿<animate attributeName="opacity" values="0;0;0;0;1;0;0;0" dur="1.2s" calcMode="discrete" repeatCount="indefinite"/></text>
+    <text x="38" y="29" opacity="0">⣟<animate attributeName="opacity" values="0;0;0;0;0;1;0;0" dur="1.2s" calcMode="discrete" repeatCount="indefinite"/></text>
+    <text x="38" y="29" opacity="0">⣯<animate attributeName="opacity" values="0;0;0;0;0;0;1;0" dur="1.2s" calcMode="discrete" repeatCount="indefinite"/></text>
+    <text x="38" y="29" opacity="0">⣷<animate attributeName="opacity" values="0;0;0;0;0;0;0;1" dur="1.2s" calcMode="discrete" repeatCount="indefinite"/></text>
+  </g>
+  <text x="60" y="29" font-family="Menlo,Consolas,monospace" font-size="17" fill="#cfd9e0">work:api</text>
+</svg>
