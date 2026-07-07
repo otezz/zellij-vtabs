@@ -136,48 +136,54 @@ zellij action start-or-reload-plugin file:~/.config/zellij/plugins/zellij-vtabs.
 
 ## Claude Code integration
 
-The attention icons are driven by broadcast pipes. In `~/.claude/settings.json`:
+The attention icons and working spinner are driven by Claude Code hooks. Rather than each
+hook piping a fixed signal, they call `shell/vtabs-work.sh` with an event name; the script
+keeps a per-pane count of the main-agent turn plus outstanding subagents and derives the
+right signal — so the spinner stays lit for the *whole* task, not just the main agent's
+first turn. Install it and wire the hooks:
+
+```bash
+cp shell/vtabs-work.sh ~/.config/zellij/vtabs-work.sh && chmod +x ~/.config/zellij/vtabs-work.sh
+```
 
 ```json
 {
   "hooks": {
-    "Notification": [{ "hooks": [{ "type": "command", "timeout": 3,
-      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::waiting::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "timeout": 3,
-      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::completed::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "timeout": 3,
-      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::working::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
+      "command": "(~/.config/zellij/vtabs-work.sh prompt >/dev/null 2>&1 &)" }] }],
     "SubagentStart": [{ "hooks": [{ "type": "command", "timeout": 3,
-      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::working::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
+      "command": "(~/.config/zellij/vtabs-work.sh subagent-start >/dev/null 2>&1 &)" }] }],
     "SubagentStop": [{ "hooks": [{ "type": "command", "timeout": 3,
-      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::working::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
+      "command": "(~/.config/zellij/vtabs-work.sh subagent-stop >/dev/null 2>&1 &)" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "timeout": 3,
+      "command": "(~/.config/zellij/vtabs-work.sh notify >/dev/null 2>&1 &)" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "timeout": 3,
+      "command": "(~/.config/zellij/vtabs-work.sh stop >/dev/null 2>&1 &)" }] }],
     "SessionEnd": [{ "hooks": [{ "type": "command", "timeout": 3,
-      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::clear-working::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }]
+      "command": "(~/.config/zellij/vtabs-work.sh end >/dev/null 2>&1 &)" }] }]
   }
 }
 ```
 
-The `< /dev/null` is required: `zellij pipe` without a payload argument reads its payload
-from stdin until EOF, and in a hook it inherits Claude's hook-JSON stdin — which stays open
-until the hook exits, deadlocking every response for the full 60s hook timeout. Redirecting
-stdin gives it an immediate EOF.
-
-- `UserPromptSubmit` (Claude starts working) → animated spinner on that tab
-- `SubagentStart` / `SubagentStop` (a subagent spawns or finishes) → re-assert the spinner,
-  so it stays alive across multi-agent tasks (`Stop` fires once per *main-agent* turn, which
-  otherwise ends the spinner while background subagents are still running)
-- `Notification` (Claude needs input) → `◆` on that tab
-- `Stop` (Claude finished) → `✓` on that tab (or just ends the spinner if you're on it)
-- `SessionEnd` (Claude exits) → ends a leftover spinner
+- `UserPromptSubmit` (new turn) → start fresh, animated spinner on that tab
+- `SubagentStart` / `SubagentStop` → adjust the outstanding-subagent count (spinner stays lit)
+- `Notification` (needs input) → `◆` on that tab
+- `Stop` (main-agent turn ended) → `✓` **only if no subagents are still outstanding**,
+  otherwise the spinner keeps running — this is the whole reason for the counter: `Stop`
+  fires once per *main-agent* turn, so without it the spinner would clear while background
+  subagents are still working
+- `SessionEnd` (Claude exits) → clears any leftover spinner and the pane's count
 - Focusing the tab clears `◆`/`✓`; the spinner survives focus and ends via the hooks above
 
-Every piece of that command shape matters: `zellij pipe` blocks forever when the session
-it runs in has no vtabs plugin listening (a session without this layout) — the stdin
-redirect does not cover that, the hook-level `"timeout"` only stops Claude waiting, and
-the coreutils `timeout 3` is what actually kills the stuck process. The `( … & )` subshell
-makes the hook return instantly — without it, `UserPromptSubmit` adds up to 3s to every
-prompt in a plugin-less session. (Shell backgrounding is fine; Claude Code's `async: true`
-hook property is not — async hooks failed to deliver pipes reliably in testing.)
+Why the script (rather than a fixed pipe per hook, and why a shell counter rather than one
+in the plugin): the plugin runs one instance per tab and pipe delivery across instances
+isn't reliable, so a counter in plugin memory would diverge — the shell gives one per-pane
+state file guarded by `flock`. Inside the script every `zellij pipe` still uses
+`< /dev/null` (without it the pipe reads Claude's hook stdin until EOF and deadlocks) and
+`timeout 3` (which actually kills the pipe when no plugin is listening — a session without
+this layout — since the hook-level `"timeout"` only stops Claude *waiting*). The `( … & )`
+subshell makes each hook return instantly. (Shell backgrounding is fine; Claude Code's
+`async: true` hook property is not — async hooks failed to deliver pipes reliably in testing.)
 
 Manual test — note it must target a **non-active** tab (the plugin never marks the tab you're
 currently on, by design):
