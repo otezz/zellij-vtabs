@@ -147,6 +147,10 @@ The attention icons are driven by broadcast pipes. In `~/.claude/settings.json`:
       "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::completed::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "timeout": 3,
       "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::working::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
+    "SubagentStart": [{ "hooks": [{ "type": "command", "timeout": 3,
+      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::working::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "timeout": 3,
+      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::working::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
     "SessionEnd": [{ "hooks": [{ "type": "command", "timeout": 3,
       "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::clear-working::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }]
   }
@@ -159,6 +163,9 @@ until the hook exits, deadlocking every response for the full 60s hook timeout. 
 stdin gives it an immediate EOF.
 
 - `UserPromptSubmit` (Claude starts working) → animated spinner on that tab
+- `SubagentStart` / `SubagentStop` (a subagent spawns or finishes) → re-assert the spinner,
+  so it stays alive across multi-agent tasks (`Stop` fires once per *main-agent* turn, which
+  otherwise ends the spinner while background subagents are still running)
 - `Notification` (Claude needs input) → `◆` on that tab
 - `Stop` (Claude finished) → `✓` on that tab (or just ends the spinner if you're on it)
 - `SessionEnd` (Claude exits) → ends a leftover spinner
