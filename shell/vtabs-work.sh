@@ -61,5 +61,22 @@ signal=$(
 )
 
 [ -n "$signal" ] || exit 0
-[ -n "$VTABS_WORK_DRYRUN" ] && { echo "$signal"; exit 0; }
+
+# Sound is gated on the computed signal, so it fires only for the real main-task
+# events — the completed check and the needs-input notification — and stays
+# silent on intermediate `stop`s and all subagent activity. (Icon name doubles
+# as the freedesktop .oga basename.)
+sound=""
+case "$signal" in
+  completed) sound="complete" ;;
+  waiting)   sound="message-new-instant" ;;
+esac
+
+if [ -n "$VTABS_WORK_DRYRUN" ]; then
+  echo "$signal ${sound:--}"
+  exit 0
+fi
+
+[ -n "$sound" ] && (canberra-gtk-play -i "$sound" >/dev/null 2>&1 \
+  || pw-play "/usr/share/sounds/freedesktop/stereo/$sound.oga" >/dev/null 2>&1 || true &)
 exec timeout 3 zellij pipe --name "zellij-vtabs::$signal::$ZELLIJ_PANE_ID" < /dev/null

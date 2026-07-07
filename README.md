@@ -175,6 +175,12 @@ cp shell/vtabs-work.sh ~/.config/zellij/vtabs-work.sh && chmod +x ~/.config/zell
 - `SessionEnd` (Claude exits) → clears any leftover spinner and the pane's count
 - Focusing the tab clears `◆`/`✓`; the spinner survives focus and ends via the hooks above
 
+The script also plays a freedesktop sound on exactly those two real events — `complete`
+when the whole task finishes and `message-new-instant` when it needs input — gated by the
+same counter, so you get one chime per task rather than one per main-agent turn or subagent.
+It falls back `canberra-gtk-play` → `pw-play` → silent, so it's a no-op where neither exists.
+Delete the `sound=` / playback lines in `vtabs-work.sh` to turn it off.
+
 Why the script (rather than a fixed pipe per hook, and why a shell counter rather than one
 in the plugin): the plugin runs one instance per tab and pipe delivery across instances
 isn't reliable, so a counter in plugin memory would diverge — the shell gives one per-pane
