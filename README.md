@@ -23,6 +23,10 @@ finished one, and `●` marks the active tab.
 - **Grouping** — a tab named `group:label` goes under group **group** with label **label**;
   a tab with no `:` lands in **General**. (First `:` wins.)
 - **Collapse / expand** groups (`▶`/`▼`).
+- **Reorder groups** — with a group header selected, `Shift+J`/`Shift+K` (or
+  `Shift+↓`/`Shift+↑`) move it down/up the list.
+- **Persistent state** — group order and collapse state survive session restarts and stay
+  in sync across every tab's sidebar (stored per session in the plugin's cache dir).
 - **Navigate** with `j`/`k`/arrows, `Enter`/`Space` to switch tab or toggle a group.
 - **Mouse**: left-click to switch/toggle, scroll to move the selection.
 - **Active tab** marked with `●`; the selection highlight follows it.
@@ -140,6 +144,14 @@ The working model, which avoids any set/clear race:
   looking at).
 - **Clear** strips the marker from the active tab on every `TabUpdate` (switching to a tab makes
   it active → it's "seen" → cleared).
+
+Group order and collapse state follow the same "only global state survives" rule: they live
+in a small file under the plugin's `/cache` mount (host side:
+`~/.cache/zellij/<plugin-location>/plugin_cache/`), which Zellij keys by plugin *location* —
+so every per-tab instance reads the same file. One file **per session** (named from
+`ModeUpdate`'s `session_name`), because a single shared file would let each session's save
+wipe the others' groups. Instances re-read the file on every `TabUpdate`, and only the
+focused (visible) instance ever writes, so the sidebar you're looking at is always fresh.
 
 Two build gotchas on modern Rust + Zellij:
 

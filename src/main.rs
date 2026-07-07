@@ -16,6 +16,15 @@ const LEFT_PAD: usize = 1;
 const MARK_WAITING: &str = " ⏳";
 const MARK_COMPLETED: &str = " ✅";
 
+/// Group order + collapse state, shared across the per-tab plugin instances and
+/// across restarts. `/cache` is mounted per plugin *location* (host side:
+/// `~/.cache/zellij/<location>/plugin_cache`), so every instance sees the same
+/// files; each re-reads its file on `TabUpdate`, which fires on every tab switch.
+/// One file per *session* (suffix = session name, learned from `ModeUpdate`) —
+/// different sessions have different groups, and a single shared file would let
+/// each session's save wipe the others' state.
+const STATE_FILE_PREFIX: &str = "/cache/vtabs-state-";
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Attention {
     Waiting,
@@ -30,6 +39,65 @@ fn merge(acc: Option<Attention>, x: Attention) -> Attention {
 }
 
 /// Split the attention marker off a tab name: "work:api ⏳" -> (Waiting, "work:api").
+/// One line per entry: `order <group>` (in order) and `collapsed <group>`.
+/// Group names may contain anything but a newline. Unknown lines are ignored.
+fn parse_state(s: &str) -> (Vec<String>, BTreeSet<String>) {
+    let mut order = Vec::new();
+    let mut collapsed = BTreeSet::new();
+    for line in s.lines() {
+        if let Some(g) = line.strip_prefix("order ") {
+            order.push(g.to_string());
+        } else if let Some(g) = line.strip_prefix("collapsed ") {
+            collapsed.insert(g.to_string());
+        }
+    }
+    (order, collapsed)
+}
+
+fn serialize_state(order: &[String], collapsed: &BTreeSet<String>) -> String {
+    let mut out = String::new();
+    for g in order {
+        out.push_str("order ");
+        out.push_str(g);
+        out.push('\n');
+    }
+    for g in collapsed {
+        out.push_str("collapsed ");
+        out.push_str(g);
+        out.push('\n');
+    }
+    out
+}
+
+/// Saved order first (dropping groups that no longer exist), then any new
+/// groups in first-appearance order.
+fn merge_order(saved: &[String], appearance: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = saved
+        .iter()
+        .filter(|g| appearance.contains(g))
+        .cloned()
+        .collect();
+    for g in appearance {
+        if !out.contains(&g) {
+            out.push(g);
+        }
+    }
+    out
+}
+
+/// Swap `name` with its neighbor `delta` steps away; false if absent or at the edge.
+fn move_in(order: &mut [String], name: &str, delta: isize) -> bool {
+    let Some(i) = order.iter().position(|g| g == name) else {
+        return false;
+    };
+    let j = i as isize + delta;
+    if j < 0 || j as usize >= order.len() {
+        return false;
+    }
+    order.swap(i, j as usize);
+    true
+}
+
 fn parse_attention(name: &str) -> (Option<Attention>, &str) {
     if let Some(base) = name.strip_suffix(MARK_WAITING) {
         (Some(Attention::Waiting), base)
@@ -46,6 +114,10 @@ struct State {
     /// terminal pane id -> tab position (rebuilt on each PaneUpdate)
     pane_tab: BTreeMap<u32, usize>,
     collapsed: BTreeSet<String>,
+    /// saved group display order; groups not listed here follow in first-appearance order
+    group_order: Vec<String>,
+    /// session name (from ModeUpdate) — state persistence is a no-op until known
+    session: Option<String>,
     selected: usize,
     separator: char,
     waiting_icon: String,
@@ -81,15 +153,53 @@ impl State {
         }
     }
 
+    /// Groups in first-appearance (tab position) order.
+    fn appearance_groups(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for t in &self.tabs {
+            let (_, base) = parse_attention(&t.name);
+            let (g, _) = self.group_of(base);
+            if !out.contains(&g) {
+                out.push(g);
+            }
+        }
+        out
+    }
+
+    fn display_group_order(&self) -> Vec<String> {
+        merge_order(&self.group_order, self.appearance_groups())
+    }
+
+    fn state_file(&self) -> Option<String> {
+        self.session
+            .as_ref()
+            .map(|s| format!("{}{}", STATE_FILE_PREFIX, s))
+    }
+
+    fn load_state(&mut self) {
+        let Some(path) = self.state_file() else {
+            return;
+        };
+        if let Ok(s) = std::fs::read_to_string(path) {
+            let (order, collapsed) = parse_state(&s);
+            self.group_order = order;
+            self.collapsed = collapsed;
+        }
+    }
+
+    fn save_state(&self) {
+        let Some(path) = self.state_file() else {
+            return;
+        };
+        let order = self.display_group_order();
+        let _ = std::fs::write(path, serialize_state(&order, &self.collapsed));
+    }
+
     fn build_rows(&self) -> Vec<Row> {
-        let mut order: Vec<String> = Vec::new();
         let mut groups: BTreeMap<String, Vec<TabItem>> = BTreeMap::new();
         for t in &self.tabs {
             let (attention, base) = parse_attention(&t.name);
             let (g, label) = self.group_of(base);
-            if !order.contains(&g) {
-                order.push(g.clone());
-            }
             groups.entry(g).or_default().push(TabItem {
                 position: t.position,
                 label: label.to_string(),
@@ -98,7 +208,7 @@ impl State {
             });
         }
         let mut rows = Vec::new();
-        for g in &order {
+        for g in &self.display_group_order() {
             let Some(items) = groups.remove(g) else {
                 continue;
             };
@@ -180,6 +290,7 @@ impl State {
                 } else {
                     self.collapsed.insert(name.clone());
                 }
+                self.save_state();
                 true
             }
             Row::Tab { position, .. } => {
@@ -189,12 +300,42 @@ impl State {
         }
     }
 
+    /// Move the group under the selection up/down in the display order (persisted).
+    fn move_selected_group(&mut self, delta: isize) -> bool {
+        let rows = self.build_rows();
+        let Some(Row::Group { name, .. }) = rows.get(self.selected) else {
+            return false;
+        };
+        let name = name.clone();
+        let mut order = self.display_group_order();
+        if !move_in(&mut order, &name, delta) {
+            return false;
+        }
+        self.group_order = order;
+        self.save_state();
+        // keep the selection on the header we just moved
+        if let Some(idx) = self
+            .build_rows()
+            .iter()
+            .position(|r| matches!(r, Row::Group { name: n, .. } if *n == name))
+        {
+            self.selected = idx;
+        }
+        true
+    }
+
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
         let len = self.build_rows().len();
         if len == 0 {
             return false;
         }
+        let shift = key.key_modifiers.contains(&KeyModifier::Shift);
         match key.bare_key {
+            // shifted chars arrive as their uppercase form, arrows carry the modifier
+            BareKey::Char('J') => self.move_selected_group(1),
+            BareKey::Char('K') => self.move_selected_group(-1),
+            BareKey::Down if shift => self.move_selected_group(1),
+            BareKey::Up if shift => self.move_selected_group(-1),
             BareKey::Char('j') | BareKey::Down => {
                 self.selected = (self.selected + 1).min(len - 1);
                 true
@@ -261,6 +402,7 @@ impl ZellijPlugin for State {
             PermissionType::ReadCliPipes,
         ]);
         subscribe(&[
+            EventType::ModeUpdate,
             EventType::TabUpdate,
             EventType::PaneUpdate,
             EventType::Key,
@@ -270,8 +412,20 @@ impl ZellijPlugin for State {
 
     fn update(&mut self, event: Event) -> bool {
         match event {
+            Event::ModeUpdate(mode_info) => {
+                if mode_info.session_name != self.session {
+                    self.session = mode_info.session_name;
+                    self.load_state();
+                    return true;
+                }
+                false
+            }
             Event::TabUpdate(tabs) => {
                 self.tabs = tabs;
+                // Pick up order/collapse changes written by other instances —
+                // every tab switch fires a TabUpdate, so the visible sidebar
+                // is always freshly synced.
+                self.load_state();
                 // Clear on focus: the active tab is "seen", so strip its marker.
                 // Safe on every TabUpdate because set_attention never marks the
                 // active tab, so there's no marker here to race with.
@@ -450,6 +604,37 @@ mod tests {
         assert_eq!(merge(Some(Attention::Completed), Attention::Waiting), Attention::Waiting);
         assert_eq!(merge(Some(Attention::Waiting), Attention::Completed), Attention::Waiting);
         assert_eq!(merge(None, Attention::Completed), Attention::Completed);
+    }
+
+    #[test]
+    fn state_roundtrips_through_serialize_and_parse() {
+        let order = vec!["work".to_string(), "General".to_string()];
+        let collapsed: BTreeSet<String> = ["scratch".to_string()].into();
+        let (o, c) = parse_state(&serialize_state(&order, &collapsed));
+        assert_eq!(o, order);
+        assert_eq!(c, collapsed);
+        assert_eq!(parse_state(""), (Vec::new(), BTreeSet::new()));
+        assert_eq!(parse_state("junk line\n"), (Vec::new(), BTreeSet::new()));
+    }
+
+    #[test]
+    fn merge_order_saved_first_then_new_dropping_stale() {
+        let saved = vec!["b".to_string(), "gone".to_string(), "a".to_string()];
+        let appearance = vec!["a".to_string(), "b".to_string(), "new".to_string()];
+        assert_eq!(merge_order(&saved, appearance), vec!["b", "a", "new"]);
+        assert_eq!(merge_order(&[], vec!["x".to_string()]), vec!["x"]);
+    }
+
+    #[test]
+    fn move_in_swaps_neighbors_and_respects_edges() {
+        let mut order: Vec<String> =
+            vec!["a".into(), "b".into(), "c".into()];
+        assert!(move_in(&mut order, "b", 1));
+        assert_eq!(order, vec!["a", "c", "b"]);
+        assert!(!move_in(&mut order, "a", -1)); // already first
+        assert!(!move_in(&mut order, "b", 1)); // already last
+        assert!(!move_in(&mut order, "missing", 1));
+        assert_eq!(order, vec!["a", "c", "b"]); // edges/missing leave order untouched
     }
 
     #[test]
