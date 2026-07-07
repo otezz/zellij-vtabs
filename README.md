@@ -103,13 +103,13 @@ The attention icons are driven by broadcast pipes. In `~/.claude/settings.json`:
 {
   "hooks": {
     "Notification": [{ "hooks": [{ "type": "command", "timeout": 3,
-      "command": "timeout 3 zellij pipe --name \"zellij-vtabs::waiting::$ZELLIJ_PANE_ID\" < /dev/null" }] }],
+      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::waiting::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
     "Stop": [{ "hooks": [{ "type": "command", "timeout": 3,
-      "command": "timeout 3 zellij pipe --name \"zellij-vtabs::completed::$ZELLIJ_PANE_ID\" < /dev/null" }] }],
+      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::completed::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "timeout": 3,
-      "command": "timeout 3 zellij pipe --name \"zellij-vtabs::working::$ZELLIJ_PANE_ID\" < /dev/null" }] }],
+      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::working::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }],
     "SessionEnd": [{ "hooks": [{ "type": "command", "timeout": 3,
-      "command": "timeout 3 zellij pipe --name \"zellij-vtabs::clear-working::$ZELLIJ_PANE_ID\" < /dev/null" }] }]
+      "command": "(timeout 3 zellij pipe --name \"zellij-vtabs::clear-working::$ZELLIJ_PANE_ID\" < /dev/null >/dev/null 2>&1 &)" }] }]
   }
 }
 ```
@@ -125,10 +125,13 @@ stdin gives it an immediate EOF.
 - `SessionEnd` (Claude exits) → ends a leftover spinner
 - Focusing the tab clears `◆`/`✓`; the spinner survives focus and ends via the hooks above
 
-Both timeouts matter: `zellij pipe` blocks forever when the session it runs in has no
-vtabs plugin listening (a session without this layout) — the stdin redirect does not
-cover that, the hook-level `"timeout"` only stops Claude waiting, and the coreutils
-`timeout 3` is what actually kills the stuck process.
+Every piece of that command shape matters: `zellij pipe` blocks forever when the session
+it runs in has no vtabs plugin listening (a session without this layout) — the stdin
+redirect does not cover that, the hook-level `"timeout"` only stops Claude waiting, and
+the coreutils `timeout 3` is what actually kills the stuck process. The `( … & )` subshell
+makes the hook return instantly — without it, `UserPromptSubmit` adds up to 3s to every
+prompt in a plugin-less session. (Shell backgrounding is fine; Claude Code's `async: true`
+hook property is not — async hooks failed to deliver pipes reliably in testing.)
 
 Manual test — note it must target a **non-active** tab (the plugin never marks the tab you're
 currently on, by design):
@@ -176,7 +179,7 @@ To have `claude -w CH-123` label its tab with the worktree name (`repo:CH-123`),
 
 ```json
 "SessionStart": [{ "hooks": [{ "type": "command", "timeout": 5,
-  "command": "~/.config/zellij/vtabs-rename.sh force" }] }]
+  "command": "(~/.config/zellij/vtabs-rename.sh force >/dev/null 2>&1 &)" }] }]
 ```
 
 ## Configuration
