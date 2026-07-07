@@ -23,10 +23,14 @@ finished one, and `●` marks the active tab.
 - **Grouping** — a tab named `group:label` goes under group **group** with label **label**;
   a tab with no `:` lands in **General**. (First `:` wins.)
 - **Collapse / expand** groups (`▶`/`▼`).
-- **Reorder groups** — with a group header selected, `Shift+J`/`Shift+K` (or
-  `Shift+↓`/`Shift+↑`) move it down/up the list.
-- **Persistent state** — group order and collapse state survive session restarts and stay
-  in sync across every tab's sidebar (stored per session in the plugin's cache dir).
+- **Reorder groups and tabs** — `Shift+J`/`Shift+K` (or `Shift+↓`/`Shift+↑`) move the
+  selected row: a group header moves the whole group, a tab moves within its group. Tab
+  moves are *virtual* (display-order only — the plugin API can't move real tabs): a group
+  follows Zellij's native tab positions until you explicitly reorder in it, after which the
+  saved order wins for that group.
+- **Persistent state** — group order, tab order, and collapse state survive session
+  restarts and stay in sync across every tab's sidebar (stored per session in the plugin's
+  cache dir).
 - **Navigate** with `j`/`k`/arrows, `Enter`/`Space` to switch tab or toggle a group.
 - **Mouse**: left-click to switch/toggle, scroll to move the selection.
 - **Active tab** marked with `●`; the selection highlight follows it.

@@ -39,34 +39,72 @@ fn merge(acc: Option<Attention>, x: Attention) -> Attention {
 }
 
 /// Split the attention marker off a tab name: "work:api ⏳" -> (Waiting, "work:api").
-/// One line per entry: `order <group>` (in order) and `collapsed <group>`.
-/// Group names may contain anything but a newline. Unknown lines are ignored.
-fn parse_state(s: &str) -> (Vec<String>, BTreeSet<String>) {
-    let mut order = Vec::new();
-    let mut collapsed = BTreeSet::new();
-    for line in s.lines() {
-        if let Some(g) = line.strip_prefix("order ") {
-            order.push(g.to_string());
-        } else if let Some(g) = line.strip_prefix("collapsed ") {
-            collapsed.insert(g.to_string());
-        }
-    }
-    (order, collapsed)
+/// Persisted sidebar state: group display order, collapsed groups, and — only
+/// for groups the user explicitly reordered tabs in — per-group tab label order.
+/// Groups absent from `tab_order` keep following Zellij's native tab positions.
+#[derive(Default, PartialEq, Debug)]
+struct Persisted {
+    order: Vec<String>,
+    collapsed: BTreeSet<String>,
+    tab_order: BTreeMap<String, Vec<String>>,
 }
 
-fn serialize_state(order: &[String], collapsed: &BTreeSet<String>) -> String {
+/// One line per entry: `order <group>` / `collapsed <group>` /
+/// `taborder <group>\t<label>` (labels of one group in order, one per line).
+/// Names may contain anything but a newline (and, for groups, a tab).
+/// Unknown lines are ignored.
+fn parse_state(s: &str) -> Persisted {
+    let mut p = Persisted::default();
+    for line in s.lines() {
+        if let Some(g) = line.strip_prefix("order ") {
+            p.order.push(g.to_string());
+        } else if let Some(g) = line.strip_prefix("collapsed ") {
+            p.collapsed.insert(g.to_string());
+        } else if let Some(rest) = line.strip_prefix("taborder ") {
+            if let Some((g, label)) = rest.split_once('\t') {
+                p.tab_order
+                    .entry(g.to_string())
+                    .or_default()
+                    .push(label.to_string());
+            }
+        }
+    }
+    p
+}
+
+fn serialize_state(p: &Persisted) -> String {
     let mut out = String::new();
-    for g in order {
+    for g in &p.order {
         out.push_str("order ");
         out.push_str(g);
         out.push('\n');
     }
-    for g in collapsed {
+    for g in &p.collapsed {
         out.push_str("collapsed ");
         out.push_str(g);
         out.push('\n');
     }
+    for (g, labels) in &p.tab_order {
+        for label in labels {
+            out.push_str("taborder ");
+            out.push_str(g);
+            out.push('\t');
+            out.push_str(label);
+            out.push('\n');
+        }
+    }
     out
+}
+
+/// Stable-sort items into saved label order; labels not in `saved` keep their
+/// native relative order after the saved ones (and duplicates stay stable).
+fn sort_by_saved(items: &mut [TabItem], saved: &[String]) {
+    items.sort_by_key(|it| {
+        saved
+            .iter()
+            .position(|l| l == &it.label)
+            .unwrap_or(usize::MAX)
+    });
 }
 
 /// Saved order first (dropping groups that no longer exist), then any new
@@ -116,6 +154,8 @@ struct State {
     collapsed: BTreeSet<String>,
     /// saved group display order; groups not listed here follow in first-appearance order
     group_order: Vec<String>,
+    /// per-group saved tab label order; groups not present follow native tab positions
+    tab_order: BTreeMap<String, Vec<String>>,
     /// session name (from ModeUpdate) — state persistence is a no-op until known
     session: Option<String>,
     selected: usize,
@@ -181,9 +221,10 @@ impl State {
             return;
         };
         if let Ok(s) = std::fs::read_to_string(path) {
-            let (order, collapsed) = parse_state(&s);
-            self.group_order = order;
-            self.collapsed = collapsed;
+            let p = parse_state(&s);
+            self.group_order = p.order;
+            self.collapsed = p.collapsed;
+            self.tab_order = p.tab_order;
         }
     }
 
@@ -191,11 +232,16 @@ impl State {
         let Some(path) = self.state_file() else {
             return;
         };
-        let order = self.display_group_order();
-        let _ = std::fs::write(path, serialize_state(&order, &self.collapsed));
+        let p = Persisted {
+            order: self.display_group_order(),
+            collapsed: self.collapsed.clone(),
+            tab_order: self.tab_order.clone(),
+        };
+        let _ = std::fs::write(path, serialize_state(&p));
     }
 
-    fn build_rows(&self) -> Vec<Row> {
+    /// Groups in display order, each with its tabs in display order.
+    fn grouped_items(&self) -> Vec<(String, Vec<TabItem>)> {
         let mut groups: BTreeMap<String, Vec<TabItem>> = BTreeMap::new();
         for t in &self.tabs {
             let (attention, base) = parse_attention(&t.name);
@@ -207,11 +253,22 @@ impl State {
                 attention,
             });
         }
+        self.display_group_order()
+            .iter()
+            .filter_map(|g| {
+                let mut items = groups.remove(g)?;
+                if let Some(saved) = self.tab_order.get(g) {
+                    sort_by_saved(&mut items, saved);
+                }
+                Some((g.clone(), items))
+            })
+            .collect()
+    }
+
+    fn build_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
-        for g in &self.display_group_order() {
-            let Some(items) = groups.remove(g) else {
-                continue;
-            };
+        for (g, items) in self.grouped_items() {
+            let g = &g;
             let collapsed = self.collapsed.contains(g);
             let group_att = items.iter().fold(None, |acc, it| match it.attention {
                 Some(x) => Some(merge(acc, x)),
@@ -300,28 +357,59 @@ impl State {
         }
     }
 
-    /// Move the group under the selection up/down in the display order (persisted).
-    fn move_selected_group(&mut self, delta: isize) -> bool {
+    /// Move the row under the selection up/down (persisted): a group header
+    /// reorders the group, a tab row reorders the tab within its group.
+    fn move_selected(&mut self, delta: isize) -> bool {
         let rows = self.build_rows();
-        let Some(Row::Group { name, .. }) = rows.get(self.selected) else {
-            return false;
-        };
-        let name = name.clone();
-        let mut order = self.display_group_order();
-        if !move_in(&mut order, &name, delta) {
-            return false;
+        match rows.get(self.selected) {
+            Some(Row::Group { name, .. }) => {
+                let name = name.clone();
+                let mut order = self.display_group_order();
+                if !move_in(&mut order, &name, delta) {
+                    return false;
+                }
+                self.group_order = order;
+                self.save_state();
+                // keep the selection on the header we just moved
+                if let Some(idx) = self
+                    .build_rows()
+                    .iter()
+                    .position(|r| matches!(r, Row::Group { name: n, .. } if *n == name))
+                {
+                    self.selected = idx;
+                }
+                true
+            }
+            Some(Row::Tab { position, label, .. }) => {
+                let (position, label) = (*position, label.clone());
+                let Some((group, items)) = self
+                    .grouped_items()
+                    .into_iter()
+                    .find(|(_, items)| items.iter().any(|it| it.position == position))
+                else {
+                    return false;
+                };
+                let mut labels: Vec<String> =
+                    items.into_iter().map(|it| it.label).collect();
+                if !move_in(&mut labels, &label, delta) {
+                    return false;
+                }
+                let present = self.appearance_groups();
+                self.tab_order.retain(|g, _| present.contains(g));
+                self.tab_order.insert(group, labels);
+                self.save_state();
+                // keep the selection on the tab we just moved
+                if let Some(idx) = self
+                    .build_rows()
+                    .iter()
+                    .position(|r| matches!(r, Row::Tab { position: p, .. } if *p == position))
+                {
+                    self.selected = idx;
+                }
+                true
+            }
+            None => false,
         }
-        self.group_order = order;
-        self.save_state();
-        // keep the selection on the header we just moved
-        if let Some(idx) = self
-            .build_rows()
-            .iter()
-            .position(|r| matches!(r, Row::Group { name: n, .. } if *n == name))
-        {
-            self.selected = idx;
-        }
-        true
     }
 
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
@@ -332,10 +420,10 @@ impl State {
         let shift = key.key_modifiers.contains(&KeyModifier::Shift);
         match key.bare_key {
             // shifted chars arrive as their uppercase form, arrows carry the modifier
-            BareKey::Char('J') => self.move_selected_group(1),
-            BareKey::Char('K') => self.move_selected_group(-1),
-            BareKey::Down if shift => self.move_selected_group(1),
-            BareKey::Up if shift => self.move_selected_group(-1),
+            BareKey::Char('J') => self.move_selected(1),
+            BareKey::Char('K') => self.move_selected(-1),
+            BareKey::Down if shift => self.move_selected(1),
+            BareKey::Up if shift => self.move_selected(-1),
             BareKey::Char('j') | BareKey::Down => {
                 self.selected = (self.selected + 1).min(len - 1);
                 true
@@ -608,13 +696,34 @@ mod tests {
 
     #[test]
     fn state_roundtrips_through_serialize_and_parse() {
-        let order = vec!["work".to_string(), "General".to_string()];
-        let collapsed: BTreeSet<String> = ["scratch".to_string()].into();
-        let (o, c) = parse_state(&serialize_state(&order, &collapsed));
-        assert_eq!(o, order);
-        assert_eq!(c, collapsed);
-        assert_eq!(parse_state(""), (Vec::new(), BTreeSet::new()));
-        assert_eq!(parse_state("junk line\n"), (Vec::new(), BTreeSet::new()));
+        let p = Persisted {
+            order: vec!["work".to_string(), "General".to_string()],
+            collapsed: ["scratch".to_string()].into(),
+            tab_order: [(
+                "work".to_string(),
+                vec!["db".to_string(), "api".to_string()],
+            )]
+            .into(),
+        };
+        assert_eq!(parse_state(&serialize_state(&p)), p);
+        assert_eq!(parse_state(""), Persisted::default());
+        assert_eq!(parse_state("junk line\n"), Persisted::default());
+    }
+
+    #[test]
+    fn sort_by_saved_orders_known_labels_then_native() {
+        let item = |label: &str, position: usize| TabItem {
+            position,
+            label: label.to_string(),
+            active: false,
+            attention: None,
+        };
+        let mut items = vec![item("a", 0), item("b", 1), item("c", 2), item("b", 3)];
+        sort_by_saved(&mut items, &["c".to_string(), "b".to_string()]);
+        let got: Vec<(usize, &str)> =
+            items.iter().map(|it| (it.position, it.label.as_str())).collect();
+        // saved first (c, then both b's in stable native order), unseen (a) after
+        assert_eq!(got, vec![(2, "c"), (1, "b"), (3, "b"), (0, "a")]);
     }
 
     #[test]
