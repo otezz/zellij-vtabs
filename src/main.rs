@@ -31,6 +31,114 @@ enum Attention {
     Completed,
 }
 
+/// Fallback grouping for auto-named tabs when no `autogroup_N` rule matches.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum AutoDefault {
+    /// group = owning git repo's name (worktree-aware); non-repo dirs are not renamed
+    Repo,
+    /// plain name = cwd basename (no group)
+    Dir,
+    /// only rename when a rule matches
+    #[default]
+    Off,
+}
+
+/// Facts about a pane's shell, piped in by `shell/vtabs.zsh` (`k=v` lines).
+/// Empty string = unknown/not applicable.
+#[derive(Default, PartialEq, Debug)]
+struct CwdFacts {
+    cwd: String,
+    /// `git rev-parse --path-format=absolute --show-toplevel`
+    toplevel: String,
+    /// `git rev-parse --path-format=absolute --git-common-dir` (main repo's .git)
+    common: String,
+    branch: String,
+}
+
+fn parse_facts(payload: &str) -> CwdFacts {
+    let mut f = CwdFacts::default();
+    for line in payload.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            let v = v.trim_end_matches('/').to_string();
+            match k {
+                "cwd" => f.cwd = v,
+                "toplevel" => f.toplevel = v,
+                "common" => f.common = v,
+                "branch" => f.branch = v,
+                _ => {}
+            }
+        }
+    }
+    f
+}
+
+fn basename(path: &str) -> &str {
+    path.trim_end_matches('/').rsplit('/').next().unwrap_or(path)
+}
+
+/// Zellij's default names for unnamed tabs ("Tab #1", …) — the only names
+/// auto-grouping is allowed to overwrite (manual names always win).
+fn is_default_tab_name(name: &str) -> bool {
+    name.strip_prefix("Tab #")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `autogroup_N "glob -> group"` config keys, in numeric order.
+fn parse_autogroup_rules(configuration: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    let mut numbered: Vec<(u32, (String, String))> = configuration
+        .iter()
+        .filter_map(|(k, v)| {
+            let n: u32 = k.strip_prefix("autogroup_")?.parse().ok()?;
+            let (pattern, group) = v.split_once(" -> ")?;
+            Some((n, (pattern.trim().to_string(), group.trim().to_string())))
+        })
+        .collect();
+    numbered.sort_by_key(|(n, _)| *n);
+    numbered.into_iter().map(|(_, rule)| rule).collect()
+}
+
+/// Derive `group:label` (or a plain name) for a pane's cwd facts.
+/// None = leave the tab alone.
+fn derive_auto_name(
+    default: AutoDefault,
+    rules: &[(String, String)],
+    f: &CwdFacts,
+) -> Option<String> {
+    if f.cwd.is_empty() {
+        return None;
+    }
+    // main repo's root dir, from its .git dir (worktrees share it)
+    let owner_path = f.common.strip_suffix("/.git").unwrap_or("");
+    let label = if !f.toplevel.is_empty() && !owner_path.is_empty() && f.toplevel != owner_path {
+        basename(&f.toplevel) // linked worktree: its dir name (e.g. CH-123)
+    } else if !f.toplevel.is_empty() && f.cwd != f.toplevel {
+        basename(&f.cwd)
+    } else if !f.branch.is_empty() {
+        &f.branch
+    } else {
+        basename(&f.cwd)
+    };
+    let rule_group = rules.iter().find_map(|(pattern, group)| {
+        (f.cwd == pattern.trim_end_matches("/**") || glob_match::glob_match(pattern, &f.cwd))
+            .then_some(group.as_str())
+    });
+    match (rule_group, default) {
+        (Some(g), _) => Some(format!("{}:{}", g, label)),
+        (None, AutoDefault::Repo) => {
+            let owner = if !owner_path.is_empty() {
+                owner_path
+            } else if !f.toplevel.is_empty() {
+                &f.toplevel
+            } else {
+                return None; // not in a git repo: leave the tab alone
+            };
+            Some(format!("{}:{}", basename(owner), label))
+        }
+        (None, AutoDefault::Dir) => Some(basename(&f.cwd).to_string()),
+        (None, AutoDefault::Off) => None,
+    }
+}
+
 fn merge(acc: Option<Attention>, x: Attention) -> Attention {
     match (acc, x) {
         (Some(Attention::Waiting), _) | (_, Attention::Waiting) => Attention::Waiting,
@@ -162,6 +270,10 @@ struct State {
     separator: char,
     waiting_icon: String,
     completed_icon: String,
+    autogroup_default: AutoDefault,
+    autogroup_rules: Vec<(String, String)>,
+    /// active group-rename edit: (original group name, input buffer)
+    renaming: Option<(String, String)>,
 }
 
 // The plugin entry points call zellij-tile's wasm host imports, which don't exist
@@ -325,6 +437,35 @@ impl State {
         }
     }
 
+    /// Auto-name the tab containing `pane_id` from its shell's cwd facts.
+    /// Unless `force`, only tabs still carrying a default "Tab #N" name are touched.
+    fn auto_rename(&self, pane_id: u32, payload: &str, force: bool) {
+        let Some(&tab_pos) = self.pane_tab.get(&pane_id) else {
+            return;
+        };
+        let Some(t) = self.tabs.iter().find(|t| t.position == tab_pos) else {
+            return;
+        };
+        let (att, base) = parse_attention(&t.name);
+        if !force && !is_default_tab_name(base) {
+            return;
+        }
+        let facts = parse_facts(payload);
+        let Some(name) = derive_auto_name(self.autogroup_default, &self.autogroup_rules, &facts)
+        else {
+            return;
+        };
+        if base == name {
+            return;
+        }
+        let marker = match att {
+            Some(Attention::Waiting) => MARK_WAITING,
+            Some(Attention::Completed) => MARK_COMPLETED,
+            None => "",
+        };
+        rename_tab(tab_pos as u32 + 1, format!("{}{}", name, marker));
+    }
+
     /// Strip the attention marker from the tab at `pos` (global rename).
     fn clear_tab(&self, pos: usize) {
         if let Some(t) = self.tabs.iter().find(|t| t.position == pos) {
@@ -412,7 +553,77 @@ impl State {
         }
     }
 
+    /// Move `old` group's saved order/collapse/tab-order entries to `new`.
+    fn migrate_group_state(&mut self, old: &str, new: &str) {
+        for g in self.group_order.iter_mut() {
+            if g == old {
+                *g = new.to_string();
+            }
+        }
+        if self.collapsed.remove(old) {
+            self.collapsed.insert(new.to_string());
+        }
+        if let Some(order) = self.tab_order.remove(old) {
+            self.tab_order.entry(new.to_string()).or_insert(order);
+        }
+    }
+
+    /// Rename group `old` to `new`: re-prefix every member tab (preserving
+    /// attention marks) and migrate the group's saved state.
+    fn commit_rename(&mut self, old: &str, new: &str) {
+        let new = new.trim();
+        if new.is_empty() || new == old {
+            return;
+        }
+        for t in &self.tabs {
+            let (att, base) = parse_attention(&t.name);
+            let (g, label) = self.group_of(base);
+            if g != old {
+                continue;
+            }
+            let marker = match att {
+                Some(Attention::Waiting) => MARK_WAITING,
+                Some(Attention::Completed) => MARK_COMPLETED,
+                None => "",
+            };
+            rename_tab(
+                t.position as u32 + 1,
+                format!("{}{}{}{}", new, self.separator, label, marker),
+            );
+        }
+        self.migrate_group_state(old, new);
+        self.save_state();
+    }
+
+    fn handle_rename_key(&mut self, key: KeyWithModifier) -> bool {
+        let Some((old, mut buf)) = self.renaming.take() else {
+            return false;
+        };
+        let plain = key.key_modifiers.is_empty()
+            || (key.key_modifiers.len() == 1 && key.key_modifiers.contains(&KeyModifier::Shift));
+        match key.bare_key {
+            BareKey::Enter => {
+                self.commit_rename(&old, &buf);
+                return true;
+            }
+            BareKey::Esc => return true, // buffer dropped = cancelled
+            BareKey::Backspace => {
+                buf.pop();
+            }
+            // separator/tab would corrupt group parsing / the state file format
+            BareKey::Char(c) if plain && !c.is_control() && c != self.separator => {
+                buf.push(c);
+            }
+            _ => {}
+        }
+        self.renaming = Some((old, buf));
+        true
+    }
+
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
+        if self.renaming.is_some() {
+            return self.handle_rename_key(key);
+        }
         let len = self.build_rows().len();
         if len == 0 {
             return false;
@@ -436,11 +647,23 @@ impl State {
                 let sel = self.selected;
                 self.activate(sel)
             }
+            BareKey::Char('r') => {
+                let rows = self.build_rows();
+                if let Some(Row::Group { name, .. }) = rows.get(self.selected) {
+                    self.renaming = Some((name.clone(), name.clone()));
+                    true
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
 
     fn handle_mouse(&mut self, mouse: Mouse) -> bool {
+        if self.renaming.take().is_some() {
+            return true; // any mouse action cancels an in-progress rename
+        }
         let len = self.build_rows().len();
         if len == 0 {
             return false;
@@ -484,6 +707,15 @@ impl ZellijPlugin for State {
             .get("completed_icon")
             .cloned()
             .unwrap_or_else(|| "✓".to_string());
+        self.autogroup_default = match configuration
+            .get("autogroup_default")
+            .map(String::as_str)
+        {
+            Some("repo") => AutoDefault::Repo,
+            Some("dir") => AutoDefault::Dir,
+            _ => AutoDefault::Off,
+        };
+        self.autogroup_rules = parse_autogroup_rules(&configuration);
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
@@ -553,6 +785,7 @@ impl ZellijPlugin for State {
             let parts: Vec<&str> = rest.split("::").collect();
             if parts.len() == 2 {
                 if let Ok(pane_id) = parts[1].parse::<u32>() {
+                    let payload = pipe_message.payload.as_deref().unwrap_or("");
                     match parts[0] {
                         "waiting" => {
                             self.set_attention(pane_id, MARK_WAITING);
@@ -560,6 +793,14 @@ impl ZellijPlugin for State {
                         }
                         "completed" => {
                             self.set_attention(pane_id, MARK_COMPLETED);
+                            return false;
+                        }
+                        "cwd" => {
+                            self.auto_rename(pane_id, payload, false);
+                            return false;
+                        }
+                        "cwd-force" => {
+                            self.auto_rename(pane_id, payload, true);
                             return false;
                         }
                         _ => {}
@@ -586,8 +827,12 @@ impl ZellijPlugin for State {
             let core = match row {
                 Row::Group { name, collapsed, count, attention } => {
                     let disc = if *collapsed { "▶" } else { "▼" };
-                    let icon = if *collapsed { self.icon(*attention) } else { String::new() };
-                    format!("{} {}{} ({})", disc, icon, name, count)
+                    if let Some((_, buf)) = self.renaming.as_ref().filter(|(o, _)| o == name) {
+                        format!("{} {}▏", disc, buf)
+                    } else {
+                        let icon = if *collapsed { self.icon(*attention) } else { String::new() };
+                        format!("{} {}{} ({})", disc, icon, name, count)
+                    }
                 }
                 Row::Tab { label, active, attention, .. } => {
                     let dot = if *active { "●" } else { " " };
@@ -744,6 +989,119 @@ mod tests {
         assert!(!move_in(&mut order, "b", 1)); // already last
         assert!(!move_in(&mut order, "missing", 1));
         assert_eq!(order, vec!["a", "c", "b"]); // edges/missing leave order untouched
+    }
+
+    fn facts(cwd: &str, toplevel: &str, common: &str, branch: &str) -> CwdFacts {
+        CwdFacts {
+            cwd: cwd.into(),
+            toplevel: toplevel.into(),
+            common: common.into(),
+            branch: branch.into(),
+        }
+    }
+
+    #[test]
+    fn parse_facts_reads_kv_lines_and_ignores_junk() {
+        let f = parse_facts("cwd=/a/b\ntoplevel=/a/b\ncommon=/a/b/.git\nbranch=main\nx\n");
+        assert_eq!(f, facts("/a/b", "/a/b", "/a/b/.git", "main"));
+        assert_eq!(parse_facts(""), CwdFacts::default());
+    }
+
+    #[test]
+    fn default_tab_names_detected() {
+        assert!(is_default_tab_name("Tab #1"));
+        assert!(is_default_tab_name("Tab #42"));
+        assert!(!is_default_tab_name("Tab #"));
+        assert!(!is_default_tab_name("Tab #1x"));
+        assert!(!is_default_tab_name("work:api"));
+    }
+
+    #[test]
+    fn autogroup_rules_parse_in_numeric_order() {
+        let cfg: BTreeMap<String, String> = [
+            ("autogroup_10".to_string(), "/b/** -> bee".to_string()),
+            ("autogroup_2".to_string(), "/a/** -> ay".to_string()),
+            ("autogroup_default".to_string(), "repo".to_string()),
+            ("autogroup_x".to_string(), "/junk/** -> nope".to_string()),
+            ("separator".to_string(), ":".to_string()),
+        ]
+        .into();
+        assert_eq!(
+            parse_autogroup_rules(&cfg),
+            vec![
+                ("/a/**".to_string(), "ay".to_string()),
+                ("/b/**".to_string(), "bee".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn derive_repo_mode_names() {
+        use AutoDefault::*;
+        // at repo root: group = repo, label = branch
+        assert_eq!(
+            derive_auto_name(Repo, &[], &facts("/c/app", "/c/app", "/c/app/.git", "main")),
+            Some("app:main".to_string())
+        );
+        // in a subdir: label = dir basename
+        assert_eq!(
+            derive_auto_name(Repo, &[], &facts("/c/app/src", "/c/app", "/c/app/.git", "main")),
+            Some("app:src".to_string())
+        );
+        // linked worktree: group = owning repo, label = worktree dir
+        assert_eq!(
+            derive_auto_name(
+                Repo,
+                &[],
+                &facts(
+                    "/c/app/.claude/worktrees/CH-123",
+                    "/c/app/.claude/worktrees/CH-123",
+                    "/c/app/.git",
+                    "CH-123"
+                )
+            ),
+            Some("app:CH-123".to_string())
+        );
+        // not a repo: leave alone
+        assert_eq!(derive_auto_name(Repo, &[], &facts("/tmp/x", "", "", "")), None);
+    }
+
+    #[test]
+    fn derive_rule_dir_and_off_modes() {
+        use AutoDefault::*;
+        let rules = vec![("/w/**".to_string(), "work".to_string())];
+        // rule wins over default, exact base dir matches too
+        assert_eq!(
+            derive_auto_name(Off, &rules, &facts("/w/app", "/w/app", "/w/app/.git", "dev")),
+            Some("work:dev".to_string())
+        );
+        assert_eq!(
+            derive_auto_name(Repo, &rules, &facts("/w", "", "", "")),
+            Some("work:w".to_string())
+        );
+        // dir mode: plain basename, ungrouped
+        assert_eq!(
+            derive_auto_name(Dir, &[], &facts("/tmp/scratch", "", "", "")),
+            Some("scratch".to_string())
+        );
+        // off + no match: leave alone
+        assert_eq!(derive_auto_name(Off, &[], &facts("/tmp/x", "", "", "")), None);
+        assert_eq!(derive_auto_name(Off, &[], &CwdFacts::default()), None);
+    }
+
+    #[test]
+    fn migrate_group_state_moves_all_entries() {
+        let mut s = State {
+            group_order: vec!["work".to_string(), "misc".to_string()],
+            collapsed: ["work".to_string()].into(),
+            tab_order: [("work".to_string(), vec!["api".to_string()])].into(),
+            ..Default::default()
+        };
+        s.migrate_group_state("work", "proj");
+        assert_eq!(s.group_order, vec!["proj", "misc"]);
+        assert!(s.collapsed.contains("proj") && !s.collapsed.contains("work"));
+        assert_eq!(s.tab_order.get("proj"), Some(&vec!["api".to_string()]));
+        assert!(!s.tab_order.contains_key("work"));
     }
 
     #[test]

@@ -4,7 +4,14 @@
 layout {
     pane split_direction="vertical" {
         pane size=28 borderless=true {
-            plugin location="file:~/.config/zellij/plugins/zellij-vtabs.wasm"
+            plugin location="file:~/.config/zellij/plugins/zellij-vtabs.wasm" {
+                // Auto-grouping (needs shell/vtabs-rename.sh piping cwd facts):
+                //   autogroup_default "repo"  — group = git repo name (worktree-aware);
+                //                       "dir" — plain cwd basename; "off" (default)
+                //   autogroup_N "glob -> group" — cwd-pattern overrides, tried in order
+                // autogroup_default "repo"
+                // autogroup_1 "/mnt/d/codes/work/** -> work"
+            }
         }
         pane // main terminal area
     }

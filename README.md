@@ -31,6 +31,11 @@ finished one, and `●` marks the active tab.
 - **Persistent state** — group order, tab order, and collapse state survive session
   restarts and stay in sync across every tab's sidebar (stored per session in the plugin's
   cache dir).
+- **Rename a group** — `r` on a group header opens an inline editor (`Enter` commits,
+  `Esc` cancels); every member tab is re-prefixed and the group's saved state follows.
+- **Auto-grouping (opt-in)** — a small shell script pipes each pane's starting directory
+  (+ git facts) to the plugin, which auto-names still-default tabs (`repo:branch`,
+  `repo:worktree`, …) by configurable rules. Manual names always win. See below.
 - **Navigate** with `j`/`k`/arrows, `Enter`/`Space` to switch tab or toggle a group.
 - **Mouse**: left-click to switch/toggle, scroll to move the selection.
 - **Active tab** marked with `●`; the selection highlight follows it.
@@ -109,6 +114,10 @@ stdin gives it an immediate EOF.
 - `Stop` (Claude finished) → `✓` on that tab
 - Focusing the tab clears it
 
+Consider adding `"timeout": 3` to these hooks: `zellij pipe` blocks forever when the
+session it runs in has no vtabs plugin listening (a session without this layout), and the
+stdin redirect does not help with that.
+
 Manual test — note it must target a **non-active** tab (the plugin never marks the tab you're
 currently on, by design):
 
@@ -117,6 +126,45 @@ currently on, by design):
 echo $ZELLIJ_PANE_ID        # e.g. 3
 # switch to another tab, then:
 zellij pipe --name "zellij-vtabs::waiting::3"
+```
+
+## Auto-grouping (opt-in)
+
+The plugin can name default-named (`Tab #N`) tabs from each pane's starting directory.
+Plugins can't see pane cwds (WASI sandbox), so a small script pipes the facts in:
+
+```bash
+cp shell/vtabs-rename.sh ~/.config/zellij/vtabs-rename.sh
+chmod +x ~/.config/zellij/vtabs-rename.sh
+```
+
+Run it once per shell start — e.g. in `~/.zshrc`:
+
+```zsh
+(~/.config/zellij/vtabs-rename.sh &) 2>/dev/null
+```
+
+Then enable it in the layout's `plugin` block:
+
+```kdl
+autogroup_default "repo"                      // repo | dir | off (default: off)
+autogroup_1 "/mnt/d/codes/work/** -> work"    // optional cwd-glob overrides, tried in order
+```
+
+- `repo` — group = the owning git repo's name, worktree-aware: a pane in a linked worktree
+  gets `repo:worktree-dir`; at the repo root the label is the branch; in a subdir, the dir
+  name. Non-repo dirs are left alone.
+- `dir` — plain `basename $cwd` (lands in **General**) when no rule matches.
+- Only tabs still named `Tab #N` are renamed — name a tab manually and it stays yours.
+
+### Claude Code worktrees
+
+To have `claude -w CH-123` label its tab with the worktree name (`repo:CH-123`), add a
+`SessionStart` hook — `force` mode deliberately overrides the tab's current name:
+
+```json
+"SessionStart": [{ "hooks": [{ "type": "command", "timeout": 5,
+  "command": "~/.config/zellij/vtabs-rename.sh force" }] }]
 ```
 
 ## Configuration
@@ -128,6 +176,7 @@ plugin location="file:~/.config/zellij/plugins/zellij-vtabs.wasm" {
     separator ":"        // tab-name group separator
     waiting_icon "◆"     // rendered yellow
     completed_icon "✓"   // rendered green
+    // plus the autogroup_* keys described above
 }
 ```
 
