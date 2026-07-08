@@ -240,6 +240,24 @@ To have `claude -w CH-123` label its tab with the worktree name (`repo:CH-123`),
   "command": "(~/.config/zellij/vtabs-rename.sh force >/dev/null 2>&1 &)" }] }]
 ```
 
+### Worktree launcher
+
+`claude -w` names the worktree for you. To create one with **your own name**, in a new tab
+grouped under the repo and already running Claude, use the `nw` / `rw` shell functions:
+
+```bash
+cp shell/vtabs-worktree.zsh ~/.config/zellij/vtabs-worktree.zsh
+cp layouts/vtabs-claude.kdl ~/.config/zellij/layouts/vtabs-claude.kdl   # a vtabs layout whose main pane runs `claude`
+# in ~/.zshrc:
+source ~/.config/zellij/vtabs-worktree.zsh
+```
+
+- `nw ch-322` → worktree at `<repo>/.claude/worktrees/ch-322` on a new branch `ch-322`,
+  opened in a new tab named `<repo>:ch-322` (so it lands in the repo's group) running Claude.
+  `nw ch-322 main` branches off `main`. Run it from anywhere inside the repo.
+- `rw` (from inside a worktree tab) removes that worktree and closes the tab; `rw -f` forces
+  past uncommitted changes. It refuses to touch the main worktree.
+
 ## Configuration
 
 Optional plugin config in the layout's `plugin` block (defaults shown):
