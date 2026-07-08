@@ -146,7 +146,7 @@ fn derive_auto_name(
     // main repo's root dir, from its .git dir (worktrees share it)
     let owner_path = f.common.strip_suffix("/.git").unwrap_or("");
     let label = if !f.toplevel.is_empty() && !owner_path.is_empty() && f.toplevel != owner_path {
-        basename(&f.toplevel) // linked worktree: its dir name (e.g. CH-123)
+        basename(&f.toplevel) // linked worktree: its dir name (e.g. fix-auth)
     } else if !f.toplevel.is_empty() && f.cwd != f.toplevel {
         basename(&f.cwd)
     } else if !f.branch.is_empty() {
@@ -1251,13 +1251,13 @@ mod tests {
                 Repo,
                 &[],
                 &facts(
-                    "/c/app/.claude/worktrees/CH-123",
-                    "/c/app/.claude/worktrees/CH-123",
+                    "/c/app/.claude/worktrees/fix-auth",
+                    "/c/app/.claude/worktrees/fix-auth",
                     "/c/app/.git",
-                    "CH-123"
+                    "fix-auth"
                 )
             ),
-            Some("app:CH-123".to_string())
+            Some("app:fix-auth".to_string())
         );
         // not a repo: leave alone
         assert_eq!(derive_auto_name(Repo, &[], &facts("/tmp/x", "", "", "")), None);

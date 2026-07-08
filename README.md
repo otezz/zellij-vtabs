@@ -232,7 +232,7 @@ autogroup_1 "/mnt/d/codes/work/** -> work"    // optional cwd-glob overrides, tr
 
 ### Claude Code worktrees
 
-To have `claude -w CH-123` label its tab with the worktree name (`repo:CH-123`), add a
+To have `claude -w fix-auth` label its tab with the worktree name (`repo:fix-auth`), add a
 `SessionStart` hook — `force` mode deliberately overrides the tab's current name:
 
 ```json
@@ -252,9 +252,9 @@ cp layouts/vtabs-claude.kdl ~/.config/zellij/layouts/vtabs-claude.kdl   # a vtab
 source ~/.config/zellij/vtabs-worktree.zsh
 ```
 
-- `nw ch-322` → worktree at `<repo>/.claude/worktrees/ch-322` on a new branch `ch-322`,
-  opened in a new tab named `<repo>:ch-322` (so it lands in the repo's group) running Claude.
-  `nw ch-322 main` branches off `main`. Run it from anywhere inside the repo.
+- `nw fix-auth` → worktree at `<repo>/.claude/worktrees/fix-auth` on a new branch `fix-auth`,
+  opened in a new tab named `<repo>:fix-auth` (so it lands in the repo's group) running Claude.
+  `nw fix-auth main` branches off `main`. Run it from anywhere inside the repo.
 - `rw` (from inside a worktree tab) removes that worktree and closes the tab; `rw -f` forces
   past uncommitted changes. It refuses to touch the main worktree.
 
