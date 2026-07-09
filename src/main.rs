@@ -506,52 +506,59 @@ impl State {
         }
     }
 
+    /// Server-fresh info for the tab containing `pane_id`. Pipe-driven renames
+    /// must never derive a tab's name from this instance's cached tab list: the
+    /// caches of hidden instances diverge, pipes broadcast to every instance,
+    /// and one stale cache writing `cached name + marker` resurrects an old tab
+    /// name (user renames kept reverting). Only the pane→tab-id mapping comes
+    /// from the cache (ids are stable); name and active flags are queried live,
+    /// so any number of instances can handle the same pipe idempotently — which
+    /// is also required, because no single instance reliably receives pipes.
+    fn fresh_tab(&self, pane_id: u32) -> Option<TabInfo> {
+        let tab_pos = *self.pane_tab.get(&pane_id)?;
+        let tab_id = self.tabs.iter().find(|t| t.position == tab_pos)?.tab_id;
+        get_tab_info(tab_id)
+    }
+
     /// Add an attention marker to the tab containing `pane_id` (global rename).
-    fn set_attention(&self, pane_id: u32, marker: &str) {
-        let active = self.tabs.iter().find(|t| t.active).map(|t| t.position);
-        let Some(&tab_pos) = self.pane_tab.get(&pane_id) else {
-            return;
-        };
-        let Some(t) = self.tabs.iter().find(|t| t.position == tab_pos) else {
+    fn set_attention(&self, pane_id: u32, attention: Attention) {
+        let Some(t) = self.fresh_tab(pane_id) else {
             return;
         };
         let (att, base) = parse_attention(&t.name);
         // Never mark the tab you're already looking at — you don't need an
         // attention cue for it, and it keeps set/clear free of any race.
         // But a working spinner on it still has to END now.
-        if Some(tab_pos) == active {
+        if t.active {
             if att == Some(Attention::Working) {
-                rename_tab(tab_pos as u32 + 1, base.to_string());
+                rename_tab_with_id(t.tab_id as u64, base.to_string());
             }
             return;
         }
-        rename_tab(tab_pos as u32 + 1, format!("{}{}", base, marker));
+        if att == Some(attention) {
+            return;
+        }
+        rename_tab_with_id(t.tab_id as u64, format!("{}{}", base, marker_of(attention)));
     }
 
     /// Mark the tab containing `pane_id` as working. Unlike attention marks
     /// this applies to the active tab too (it is not cleared on focus, so
     /// there is no set/clear race — only pipes ever end it).
     fn set_working(&self, pane_id: u32) {
-        let Some(&tab_pos) = self.pane_tab.get(&pane_id) else {
-            return;
-        };
-        if let Some(t) = self.tabs.iter().find(|t| t.position == tab_pos) {
+        if let Some(t) = self.fresh_tab(pane_id) {
             let (att, base) = parse_attention(&t.name);
             if att != Some(Attention::Working) {
-                rename_tab(tab_pos as u32 + 1, format!("{}{}", base, MARK_WORKING));
+                rename_tab_with_id(t.tab_id as u64, format!("{}{}", base, MARK_WORKING));
             }
         }
     }
 
     /// Strip a working marker (Claude exited without a Stop) — attention marks stay.
     fn clear_working(&self, pane_id: u32) {
-        let Some(&tab_pos) = self.pane_tab.get(&pane_id) else {
-            return;
-        };
-        if let Some(t) = self.tabs.iter().find(|t| t.position == tab_pos) {
+        if let Some(t) = self.fresh_tab(pane_id) {
             let (att, base) = parse_attention(&t.name);
             if att == Some(Attention::Working) {
-                rename_tab(tab_pos as u32 + 1, base.to_string());
+                rename_tab_with_id(t.tab_id as u64, base.to_string());
             }
         }
     }
@@ -559,10 +566,7 @@ impl State {
     /// Auto-name the tab containing `pane_id` from its shell's cwd facts.
     /// Unless `force`, only tabs still carrying a default "Tab #N" name are touched.
     fn auto_rename(&self, pane_id: u32, payload: &str, force: bool) {
-        let Some(&tab_pos) = self.pane_tab.get(&pane_id) else {
-            return;
-        };
-        let Some(t) = self.tabs.iter().find(|t| t.position == tab_pos) else {
+        let Some(t) = self.fresh_tab(pane_id) else {
             return;
         };
         let (att, base) = parse_attention(&t.name);
@@ -578,7 +582,7 @@ impl State {
             return;
         }
         let marker = att.map(marker_of).unwrap_or("");
-        rename_tab(tab_pos as u32 + 1, format!("{}{}", name, marker));
+        rename_tab_with_id(t.tab_id as u64, format!("{}{}", name, marker));
     }
 
     /// Strip a *seen* attention marker from the tab at `pos` (global rename).
@@ -588,7 +592,7 @@ impl State {
         if let Some(t) = self.tabs.iter().find(|t| t.position == pos) {
             let (att, base) = parse_attention(&t.name);
             if matches!(att, Some(Attention::Waiting) | Some(Attention::Completed)) {
-                rename_tab(pos as u32 + 1, base.to_string());
+                rename_tab_with_id(t.tab_id as u64, base.to_string());
             }
         }
     }
@@ -952,11 +956,11 @@ impl ZellijPlugin for State {
                     let payload = pipe_message.payload.as_deref().unwrap_or("");
                     match parts[0] {
                         "waiting" => {
-                            self.set_attention(pane_id, MARK_WAITING);
+                            self.set_attention(pane_id, Attention::Waiting);
                             return false;
                         }
                         "completed" => {
-                            self.set_attention(pane_id, MARK_COMPLETED);
+                            self.set_attention(pane_id, Attention::Completed);
                             return false;
                         }
                         "cwd" => {
