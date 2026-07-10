@@ -2588,7 +2588,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-vtabs"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "glob-match",
  "zellij-tile",
